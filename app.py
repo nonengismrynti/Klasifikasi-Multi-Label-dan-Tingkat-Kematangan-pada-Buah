@@ -31,7 +31,7 @@ if not os.path.exists(MODEL_PATH) or os.path.getsize(MODEL_PATH) < 50000:
 
 # --- 3. Komponen Model ---
 class PatchEmbedding(nn.Module):
-    def __init__(self, in_channels=3, patch_size=14, emb_size=640):
+    def __init__(self, in_channels=3, patch_size=14, emb_size=768):
         super().__init__()
         self.proj = nn.Conv2d(in_channels, emb_size, kernel_size=patch_size, stride=patch_size)
 
@@ -76,7 +76,7 @@ class InteractionBlock(nn.Module):
         return attn_output
 
 class CrossScaleAggregation(nn.Module):
-    def __init__(self, embed_dim=640, num_scales=3):
+    def __init__(self, embed_dim=768, num_scales=3):
         super().__init__()
         self.num_scales = num_scales
         self.linears = nn.ModuleList([
@@ -106,7 +106,7 @@ class HamburgerHead(nn.Module):
         return self.linear(x)
 
 class MLPClassifier(nn.Module):
-    def __init__(self, in_dim=640, num_classes=9, hidden_dim=256):  # 256 sesuai checkpoint
+    def __init__(self, in_dim=768, num_classes=9, hidden_dim=256):  # 256 sesuai checkpoint
         super().__init__()
         self.mlp = nn.Sequential(
             nn.Linear(in_dim, hidden_dim),
@@ -118,7 +118,7 @@ class MLPClassifier(nn.Module):
         return self.mlp(x)
 
 class HSVLTModel(nn.Module):
-    def __init__(self, img_size=210, patch_size=14, emb_size=640, num_classes=9):
+    def __init__(self, img_size=210, patch_size=14, emb_size=768, num_classes=9):
         super().__init__()
         self.patch_embed = PatchEmbedding(patch_size=patch_size, emb_size=emb_size)
         self.word_embed = nn.Identity()
@@ -153,7 +153,7 @@ device = 'cuda' if torch.cuda.is_available() else 'cpu'
 try:
     with safe_open(MODEL_PATH, framework="pt", device=device) as f:
         state_dict = {k: f.get_tensor(k) for k in f.keys()}
-    model = HSVLTModel().to(device)
+    model = HSVLTModel(emb_size=768).to(device)
     model.load_state_dict(state_dict, strict=False)
     model.eval()
 except Exception as e:
