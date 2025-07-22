@@ -17,6 +17,7 @@ LABELS = [
     'mangga', 'mangga_matang', 'mangga_mentah'
 ]
 THRESHOLD = 0.3
+EMB_SIZE = 768  # Sesuai checkpoint
 
 # --- 2. Download model ---
 def download_model():
@@ -31,7 +32,7 @@ if not os.path.exists(MODEL_PATH) or os.path.getsize(MODEL_PATH) < 50000:
 
 # --- 3. Komponen Model ---
 class PatchEmbedding(nn.Module):
-    def __init__(self, in_channels=3, patch_size=14, emb_size=768):
+    def __init__(self, in_channels=3, patch_size=14, emb_size=EMB_SIZE):
         super().__init__()
         self.proj = nn.Conv2d(in_channels, emb_size, kernel_size=patch_size, stride=patch_size)
 
@@ -67,7 +68,7 @@ class ChannelUnification(nn.Module):
         return self.norm(x)
 
 class InteractionBlock(nn.Module):
-    def __init__(self, dim, num_heads=10):
+    def __init__(self, dim, num_heads=12):  # 12 agar 768 / 12 = 64 (valid)
         super().__init__()
         self.attn = nn.MultiheadAttention(embed_dim=dim, num_heads=num_heads, batch_first=True)
 
@@ -76,7 +77,7 @@ class InteractionBlock(nn.Module):
         return attn_output
 
 class CrossScaleAggregation(nn.Module):
-    def __init__(self, embed_dim=768, num_scales=3):
+    def __init__(self, embed_dim=EMB_SIZE, num_scales=3):
         super().__init__()
         self.num_scales = num_scales
         self.linears = nn.ModuleList([
@@ -106,7 +107,7 @@ class HamburgerHead(nn.Module):
         return self.linear(x)
 
 class MLPClassifier(nn.Module):
-    def __init__(self, in_dim=768, num_classes=9, hidden_dim=256):  # 256 sesuai checkpoint
+    def __init__(self, in_dim=EMB_SIZE, num_classes=9, hidden_dim=256):  # hidden_dim sesuai checkpoint
         super().__init__()
         self.mlp = nn.Sequential(
             nn.Linear(in_dim, hidden_dim),
@@ -118,7 +119,7 @@ class MLPClassifier(nn.Module):
         return self.mlp(x)
 
 class HSVLTModel(nn.Module):
-    def __init__(self, img_size=210, patch_size=14, emb_size=768, num_classes=9):
+    def __init__(self, img_size=210, patch_size=14, emb_size=EMB_SIZE, num_classes=9):
         super().__init__()
         self.patch_embed = PatchEmbedding(patch_size=patch_size, emb_size=emb_size)
         self.word_embed = nn.Identity()
@@ -132,12 +133,12 @@ class HSVLTModel(nn.Module):
             InteractionBlock(emb_size)
         )
         self.csa = CrossScaleAggregation(embed_dim=emb_size)
-        self.head = HamburgerHead(emb_size, emb_size)  # head.linear
+        self.head = HamburgerHead(emb_size, emb_size)
         self.classifier = MLPClassifier(in_dim=emb_size, num_classes=num_classes, hidden_dim=256)
 
     def forward(self, image):
         B = image.size(0)
-        dummy_text = torch.randn(B, 1, 640).to(image.device)
+        dummy_text = torch.randn(B, 1, EMB_SIZE).to(image.device)  # disesuaikan ke 768
         image_feat = self.patch_embed(image)
         x = self.concat(image_feat, dummy_text)
         x = self.scale_transform(x)
@@ -153,8 +154,8 @@ device = 'cuda' if torch.cuda.is_available() else 'cpu'
 try:
     with safe_open(MODEL_PATH, framework="pt", device=device) as f:
         state_dict = {k: f.get_tensor(k) for k in f.keys()}
-    model = HSVLTModel(emb_size=768).to(device)
-    model.load_state_dict(state_dict, strict=False)
+    model = HSVLTModel(emb_size=EMB_SIZE).to(device)
+    model.load_state_dict(state_dict, strict=False)  # partial load OK
     model.eval()
 except Exception as e:
     st.error(f"❌ Gagal memuat model: {e}")
