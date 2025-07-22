@@ -11,13 +11,20 @@ import os
 # --- 1. Setup ---
 MODEL_URL = 'https://drive.google.com/uc?id=1OB3XnCwW2MiEAzPJDMO9bD50_6qG4aR_'
 MODEL_PATH = 'model_1.safetensors'
+
 LABELS = [
     'alpukat', 'alpukat_matang', 'alpukat_mentah',
     'belimbing', 'belimbing_matang', 'belimbing_mentah',
     'mangga', 'mangga_matang', 'mangga_mentah'
 ]
-THRESHOLD = 0.3
-EMB_SIZE = 768  # Sesuai checkpoint
+
+# ✅ Sesuaikan dengan training config
+HIDDEN_DIM = 640
+PATCH_SIZE = 14
+IMAGE_SIZE = 210
+NUM_HEADS = 10
+NUM_LAYERS = 4
+THRESHOLD = 0.30
 
 # --- 2. Download model ---
 def download_model():
@@ -32,7 +39,7 @@ if not os.path.exists(MODEL_PATH) or os.path.getsize(MODEL_PATH) < 50000:
 
 # --- 3. Komponen Model ---
 class PatchEmbedding(nn.Module):
-    def __init__(self, in_channels=3, patch_size=14, emb_size=EMB_SIZE):
+    def __init__(self, in_channels=3, patch_size=PATCH_SIZE, emb_size=HIDDEN_DIM):
         super().__init__()
         self.proj = nn.Conv2d(in_channels, emb_size, kernel_size=patch_size, stride=patch_size)
 
@@ -68,7 +75,7 @@ class ChannelUnification(nn.Module):
         return self.norm(x)
 
 class InteractionBlock(nn.Module):
-    def __init__(self, dim, num_heads=12):  # 12 agar 768 / 12 = 64 (valid)
+    def __init__(self, dim, num_heads=NUM_HEADS):
         super().__init__()
         self.attn = nn.MultiheadAttention(embed_dim=dim, num_heads=num_heads, batch_first=True)
 
@@ -77,7 +84,7 @@ class InteractionBlock(nn.Module):
         return attn_output
 
 class CrossScaleAggregation(nn.Module):
-    def __init__(self, embed_dim=EMB_SIZE, num_scales=3):
+    def __init__(self, embed_dim=HIDDEN_DIM, num_scales=3):
         super().__init__()
         self.num_scales = num_scales
         self.linears = nn.ModuleList([
@@ -107,7 +114,7 @@ class HamburgerHead(nn.Module):
         return self.linear(x)
 
 class MLPClassifier(nn.Module):
-    def __init__(self, in_dim=EMB_SIZE, num_classes=9, hidden_dim=256):  # hidden_dim sesuai checkpoint
+    def __init__(self, in_dim=HIDDEN_DIM, num_classes=9, hidden_dim=256):
         super().__init__()
         self.mlp = nn.Sequential(
             nn.Linear(in_dim, hidden_dim),
@@ -119,7 +126,7 @@ class MLPClassifier(nn.Module):
         return self.mlp(x)
 
 class HSVLTModel(nn.Module):
-    def __init__(self, img_size=210, patch_size=14, emb_size=EMB_SIZE, num_classes=9):
+    def __init__(self, img_size=IMAGE_SIZE, patch_size=PATCH_SIZE, emb_size=HIDDEN_DIM, num_classes=9):
         super().__init__()
         self.patch_embed = PatchEmbedding(patch_size=patch_size, emb_size=emb_size)
         self.word_embed = nn.Identity()
@@ -127,10 +134,7 @@ class HSVLTModel(nn.Module):
         self.scale_transform = ScaleTransformation(emb_size * 2, emb_size)
         self.channel_unification = ChannelUnification(emb_size)
         self.interaction_blocks = nn.Sequential(
-            InteractionBlock(emb_size),
-            InteractionBlock(emb_size),
-            InteractionBlock(emb_size),
-            InteractionBlock(emb_size)
+            *[InteractionBlock(emb_size, NUM_HEADS) for _ in range(NUM_LAYERS)]
         )
         self.csa = CrossScaleAggregation(embed_dim=emb_size)
         self.head = HamburgerHead(emb_size, emb_size)
@@ -138,7 +142,7 @@ class HSVLTModel(nn.Module):
 
     def forward(self, image):
         B = image.size(0)
-        dummy_text = torch.randn(B, 1, EMB_SIZE).to(image.device)  # disesuaikan ke 768
+        dummy_text = torch.randn(B, 1, HIDDEN_DIM).to(image.device)  # ✅ pakai 640
         image_feat = self.patch_embed(image)
         x = self.concat(image_feat, dummy_text)
         x = self.scale_transform(x)
@@ -154,8 +158,13 @@ device = 'cuda' if torch.cuda.is_available() else 'cpu'
 try:
     with safe_open(MODEL_PATH, framework="pt", device=device) as f:
         state_dict = {k: f.get_tensor(k) for k in f.keys()}
-    model = HSVLTModel(emb_size=EMB_SIZE).to(device)
-    model.load_state_dict(state_dict, strict=False)  # partial load OK
+    model = HSVLTModel(
+        img_size=IMAGE_SIZE,
+        patch_size=PATCH_SIZE,
+        emb_size=HIDDEN_DIM,
+        num_classes=len(LABELS)
+    ).to(device)
+    model.load_state_dict(state_dict, strict=False)  # ✅ sekarang dimensi cocok
     model.eval()
 except Exception as e:
     st.error(f"❌ Gagal memuat model: {e}")
@@ -163,7 +172,7 @@ except Exception as e:
 
 # --- 5. Transformasi Gambar ---
 transform = transforms.Compose([
-    transforms.Resize((210, 210)),
+    transforms.Resize((IMAGE_SIZE, IMAGE_SIZE)),
     transforms.ToTensor()
 ])
 
