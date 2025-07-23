@@ -18,11 +18,11 @@ LABELS = [
     'mangga', 'mangga_matang', 'mangga_mentah'
 ]
 
-# ✅ Sesuaikan dengan checkpoint (bukan training param lama)
-HIDDEN_DIM = 768     # HARUS sama seperti checkpoint
+# ✅ Pakai parameter asli training
+HIDDEN_DIM = 640
 PATCH_SIZE = 14
 IMAGE_SIZE = 210
-NUM_HEADS = 12       # 768 / 12 = 64 -> valid
+NUM_HEADS = 10
 NUM_LAYERS = 4
 THRESHOLD = 0.30
 
@@ -83,28 +83,6 @@ class InteractionBlock(nn.Module):
         attn_output, _ = self.attn(x, x, x)
         return attn_output
 
-class CrossScaleAggregation(nn.Module):
-    def __init__(self, embed_dim=HIDDEN_DIM, num_scales=3):
-        super().__init__()
-        self.num_scales = num_scales
-        self.linears = nn.ModuleList([
-            nn.Linear(embed_dim, embed_dim) for _ in range(num_scales)
-        ])
-
-    def forward(self, x):
-        B, N, E = x.shape
-        scales = []
-        for i in range(self.num_scales):
-            pool_size = max(1, N // (2 ** i))
-            reshaped = x.permute(0, 2, 1)
-            pooled = F.adaptive_avg_pool1d(reshaped, output_size=pool_size)
-            pooled = pooled.permute(0, 2, 1)
-            pooled_mean = pooled.mean(dim=1, keepdim=True)
-            scaled = self.linears[i](pooled_mean)
-            scales.append(scaled)
-        agg = torch.cat(scales, dim=1)
-        return agg
-
 class HamburgerHead(nn.Module):
     def __init__(self, in_dim, out_dim):
         super().__init__()
@@ -136,19 +114,18 @@ class HSVLTModel(nn.Module):
         self.interaction_blocks = nn.Sequential(
             *[InteractionBlock(emb_size, NUM_HEADS) for _ in range(NUM_LAYERS)]
         )
-        self.csa = CrossScaleAggregation(embed_dim=emb_size)
+        # ❌ Hapus CSA karena tidak ada di checkpoint
         self.head = HamburgerHead(emb_size, emb_size)
         self.classifier = MLPClassifier(in_dim=emb_size, num_classes=num_classes, hidden_dim=256)
 
     def forward(self, image):
         B = image.size(0)
-        dummy_text = torch.randn(B, 1, HIDDEN_DIM).to(image.device)  # pakai 768
+        dummy_text = torch.randn(B, 1, HIDDEN_DIM).to(image.device)
         image_feat = self.patch_embed(image)
         x = self.concat(image_feat, dummy_text)
         x = self.scale_transform(x)
         x = self.channel_unification(x)
         x = self.interaction_blocks(x)
-        x = self.csa(x)
         x = self.head(x)
         x = x.mean(dim=1)
         return self.classifier(x)
@@ -164,7 +141,7 @@ try:
         emb_size=HIDDEN_DIM,
         num_classes=len(LABELS)
     ).to(device)
-    model.load_state_dict(state_dict, strict=True)  # sekarang harus cocok
+    model.load_state_dict(state_dict, strict=True)  # sekarang HARUS cocok
     model.eval()
 except Exception as e:
     st.error(f"❌ Gagal memuat model: {e}")
