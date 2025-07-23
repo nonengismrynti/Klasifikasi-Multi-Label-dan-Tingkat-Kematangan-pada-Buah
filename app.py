@@ -151,30 +151,34 @@ transform = transforms.Compose([
     transforms.ToTensor()
 ])
 
-# --- ✅ Multi-Crop Sliding Window ---
-def multi_crop_inference(image, model, transform, device):
-    """Bagi gambar jadi 4 kuadran, prediksi tiap crop, ambil nilai max"""
+# --- ✅ Multi-Crop 9 Grid Sliding Window ---
+def multi_crop_9grid_inference(image, model, transform, device):
+    """Bagi gambar jadi 9 grid (3x3), prediksi tiap crop, ambil nilai max"""
     w, h = image.size
-    crops = [
-        image.crop((0, 0, w//2, h//2)),        # kiri atas
-        image.crop((w//2, 0, w, h//2)),        # kanan atas
-        image.crop((0, h//2, w//2, h)),        # kiri bawah
-        image.crop((w//2, h//2, w, h))         # kanan bawah
-    ]
-    
+    step_w = w // 3
+    step_h = h // 3
+
+    crops = []
+    for i in range(3):  # baris
+        for j in range(3):  # kolom
+            x1 = j * step_w
+            y1 = i * step_h
+            x2 = (j + 1) * step_w if j < 2 else w
+            y2 = (i + 1) * step_h if i < 2 else h
+            crops.append(image.crop((x1, y1, x2, y2)))
+
     combined_probs = torch.zeros(len(LABELS))
     for crop in crops:
         input_tensor = transform(crop).unsqueeze(0).to(device)
         with torch.no_grad():
             outputs = model(input_tensor)
             probs = torch.sigmoid(outputs).cpu()
-            # ambil max dari semua crop, supaya label muncul jika ada di salah satu bagian
-            combined_probs = torch.max(combined_probs, probs[0])
-    
+            combined_probs = torch.max(combined_probs, probs[0])  # ambil skor max per label
+
     return combined_probs.numpy().tolist()
 
 # --- 6. Streamlit UI ---
-st.title("🍉 Klasifikasi Multilabel Buah (Multi-Crop Sliding Window)")
+st.title("🍉 Klasifikasi Multilabel Buah")
 st.write("Upload gambar buah, sistem akan mendeteksi beberapa label sekaligus bahkan jika ada di pojok gambar.")
 
 uploaded_file = st.file_uploader("Unggah gambar buah", type=['jpg', 'jpeg', 'png'])
@@ -183,8 +187,8 @@ if uploaded_file is not None:
     image = Image.open(uploaded_file).convert('RGB')
     st.image(image, caption="Gambar Input", use_container_width=True)
 
-    # ✅ Multi-crop inference
-    probs = multi_crop_inference(image, model, transform, device)
+    # ✅ Multi-crop 9 grid inference
+    probs = multi_crop_9grid_inference(image, model, transform, device)
 
     # Urutkan semua label dari skor tertinggi ke terendah
     all_labels_sorted = sorted(zip(LABELS, probs), key=lambda x: x[1], reverse=True)
