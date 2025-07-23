@@ -18,13 +18,13 @@ LABELS = [
 ]
 
 # ✅ Pakai parameter asli training
-# ✅ Pakai parameter asli training (dari checkpoint)
-HIDDEN_DIM = 768   # <--- HARUS 768 sesuai error checkpoint
+HIDDEN_DIM = 768   # sesuai checkpoint
 PATCH_SIZE = 14
 IMAGE_SIZE = 210
-NUM_HEADS = 12     # kemungkinan 12 heads kalau dim 768
-NUM_LAYERS = 4
+NUM_HEADS = 12     # 768/12 = 64 per-head
+NUM_LAYERS = 2     # checkpoint hanya punya 2 layer!
 THRESHOLD = 0.30
+
 
 # --- 2. Download model ---
 def download_model():
