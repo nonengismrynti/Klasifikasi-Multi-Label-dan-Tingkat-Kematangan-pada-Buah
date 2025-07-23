@@ -166,15 +166,22 @@ if uploaded_file is not None:
         outputs = model(input_tensor)
         probs = torch.sigmoid(outputs).cpu().numpy()[0].tolist()
 
+    # ambil label di atas threshold
     detected_labels = [(label, prob) for label, prob in zip(LABELS, probs) if prob >= THRESHOLD]
     detected_labels.sort(key=lambda x: x[1], reverse=True)
 
+    # ambil probabilitas maksimum
+    max_prob = max(probs)
+
     st.subheader("🔍 Label Terdeteksi:")
-    if detected_labels:
-        for label, prob in detected_labels:
-            st.write(f"✅ *{label}* ({prob:.2%})")
-    else:
+
+    if max_prob < THRESHOLD:  
+        # semua probabilitas terlalu rendah → bukan buah
         st.warning("🚫 Gambar tidak mengandung buah yang dikenali.")
+    else:
+        # tampilkan label di atas ambang
+        for label, prob in detected_labels:
+            st.write(f"✅ **{label}** ({prob:.2%})")
 
     with st.expander("📊 Lihat Semua Probabilitas"):
         for label, prob in zip(LABELS, probs):
