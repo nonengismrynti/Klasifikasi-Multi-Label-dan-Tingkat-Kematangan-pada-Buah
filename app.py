@@ -17,14 +17,13 @@ LABELS = [
     'mangga', 'mangga_matang', 'mangga_mentah'
 ]
 
-# ✅ Pakai parameter asli training
-HIDDEN_DIM = 768   # sesuai checkpoint
+# ✅ Parameter sesuai training checkpoint
+HIDDEN_DIM = 640
 PATCH_SIZE = 14
 IMAGE_SIZE = 210
-NUM_HEADS = 12     # 768/12 = 64 per-head
-NUM_LAYERS = 2     # checkpoint hanya punya 2 layer!
+NUM_HEADS = 10     # 640/10 = 64 per head
+NUM_LAYERS = 4     # checkpoint punya 4 layers
 THRESHOLD = 0.30
-
 
 # --- 2. Download model ---
 def download_model():
@@ -134,13 +133,22 @@ device = 'cuda' if torch.cuda.is_available() else 'cpu'
 try:
     with safe_open(MODEL_PATH, framework="pt", device=device) as f:
         state_dict = {k: f.get_tensor(k) for k in f.keys()}
+
     model = HSVLTModel(
         patch_size=PATCH_SIZE,
         emb_size=HIDDEN_DIM,
         num_classes=len(LABELS)
     ).to(device)
-    model.load_state_dict(state_dict, strict=True)
+
+    # ✅ Load dengan strict=False supaya key mismatch diabaikan
+    missing, unexpected = model.load_state_dict(state_dict, strict=False)
+    if missing:
+        st.warning(f"⚠️ Missing keys saat load model: {missing}")
+    if unexpected:
+        st.warning(f"⚠️ Unexpected keys saat load model: {unexpected}")
+
     model.eval()
+
 except Exception as e:
     st.error(f"❌ Gagal memuat model: {e}")
     st.stop()
@@ -177,8 +185,7 @@ if uploaded_file is not None:
 
     st.subheader("🔍 Label Terdeteksi:")
 
-    # ✅ Cek OOD (bukan buah)
-    # jika max_prob < 0.6 ATAU mean_prob < 0.2 => anggap bukan buah
+    # ✅ Jika semua confidence rendah → bukan buah
     if (max_prob < 0.6) or (mean_prob < 0.2):
         st.warning("🚫 Gambar tidak mengandung buah yang dikenali.")
     else:
@@ -188,7 +195,8 @@ if uploaded_file is not None:
         else:
             st.warning("🚫 Tidak ada label yang melewati ambang batas.")
 
-    # ✅ Tetap tampilkan semua probabilitas untuk debugging
+    # ✅ Tampilkan semua probabilitas untuk debug
     with st.expander("📊 Lihat Semua Probabilitas"):
         for label, prob in zip(LABELS, probs):
             st.write(f"{label}: {prob:.2%}")
+            
