@@ -39,8 +39,8 @@ if not os.path.exists(MODEL_PATH) or os.path.getsize(MODEL_PATH) < 50000:
 
 # --- 3. Komponen Model ---
 class PatchEmbedding(nn.Module):
-    def _init_(self, in_channels=3, patch_size=PATCH_SIZE, emb_size=HIDDEN_DIM):
-        super()._init_()
+    def __init__(self, in_channels=3, patch_size=PATCH_SIZE, emb_size=HIDDEN_DIM):
+        super().__init__()
         self.proj = nn.Conv2d(in_channels, emb_size, kernel_size=patch_size, stride=patch_size)
 
     def forward(self, x):
@@ -50,8 +50,8 @@ class PatchEmbedding(nn.Module):
         return x
 
 class FeatureFusion(nn.Module):
-    def _init_(self):
-        super()._init_()
+    def __init__(self):
+        super().__init__()
 
     def forward(self, visual_embed, text_embed):
         text_expand = text_embed.mean(dim=1, keepdim=True).repeat(1, visual_embed.size(1), 1)
@@ -59,24 +59,24 @@ class FeatureFusion(nn.Module):
         return fused
 
 class ScaleTransformation(nn.Module):
-    def _init_(self, in_dim, out_dim):
-        super()._init_()
+    def __init__(self, in_dim, out_dim):
+        super().__init__()
         self.linear = nn.Linear(in_dim, out_dim)
 
     def forward(self, x):
         return self.linear(x)
 
 class ChannelUnification(nn.Module):
-    def _init_(self, dim):
-        super()._init_()
+    def __init__(self, dim):
+        super().__init__()
         self.norm = nn.LayerNorm(dim)
 
     def forward(self, x):
         return self.norm(x)
 
 class InteractionBlock(nn.Module):
-    def _init_(self, dim, num_heads=NUM_HEADS):
-        super()._init_()
+    def __init__(self, dim, num_heads=NUM_HEADS):
+        super().__init__()
         self.attn = nn.MultiheadAttention(embed_dim=dim, num_heads=num_heads, batch_first=True)
 
     def forward(self, x):
@@ -84,16 +84,16 @@ class InteractionBlock(nn.Module):
         return attn_output
 
 class HamburgerHead(nn.Module):
-    def _init_(self, in_dim, out_dim):
-        super()._init_()
+    def __init__(self, in_dim, out_dim):
+        super().__init__()
         self.linear = nn.Linear(in_dim, out_dim)
 
     def forward(self, x):
         return self.linear(x)
 
 class MLPClassifier(nn.Module):
-    def _init_(self, in_dim=HIDDEN_DIM, num_classes=9, hidden_dim=256):
-        super()._init_()
+    def __init__(self, in_dim=HIDDEN_DIM, num_classes=9, hidden_dim=256):
+        super().__init__()
         self.mlp = nn.Sequential(
             nn.Linear(in_dim, hidden_dim),
             nn.ReLU(),
@@ -102,6 +102,32 @@ class MLPClassifier(nn.Module):
 
     def forward(self, x):
         return self.mlp(x)
+
+class HSVLTModel(nn.Module):
+    def __init__(self, img_size=IMAGE_SIZE, patch_size=PATCH_SIZE, emb_size=HIDDEN_DIM, num_classes=9):
+        super().__init__()
+        self.patch_embed = PatchEmbedding(patch_size=patch_size, emb_size=emb_size)
+        self.word_embed = nn.Identity()
+        self.concat = FeatureFusion()
+        self.scale_transform = ScaleTransformation(emb_size * 2, emb_size)
+        self.channel_unification = ChannelUnification(emb_size)
+        self.interaction_blocks = nn.Sequential(
+            *[InteractionBlock(emb_size, NUM_HEADS) for _ in range(NUM_LAYERS)]
+        )
+        self.head = HamburgerHead(emb_size, emb_size)
+        self.classifier = MLPClassifier(in_dim=emb_size, num_classes=num_classes, hidden_dim=256)
+
+    def forward(self, image):
+        B = image.size(0)
+        dummy_text = torch.randn(B, 1, HIDDEN_DIM).to(image.device)
+        image_feat = self.patch_embed(image)
+        x = self.concat(image_feat, dummy_text)
+        x = self.scale_transform(x)
+        x = self.channel_unification(x)
+        x = self.interaction_blocks(x)
+        x = self.head(x)
+        x = x.mean(dim=1)
+        return self.classifier(x)
 
 class HSVLTModel(nn.Module):
     def _init_(self, img_size=IMAGE_SIZE, patch_size=PATCH_SIZE, emb_size=HIDDEN_DIM, num_classes=9):
