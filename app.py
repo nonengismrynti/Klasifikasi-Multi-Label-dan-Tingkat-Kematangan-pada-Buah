@@ -18,7 +18,7 @@ LABELS = [
     'mangga', 'mangga_matang', 'mangga_mentah'
 ]
 
-# ✅ Pakai parameter asli training
+# ✅ Parameter sesuai training
 HIDDEN_DIM = 640
 PATCH_SIZE = 14
 IMAGE_SIZE = 210
@@ -129,33 +129,6 @@ class HSVLTModel(nn.Module):
         x = x.mean(dim=1)
         return self.classifier(x)
 
-class HSVLTModel(nn.Module):
-    def _init_(self, img_size=IMAGE_SIZE, patch_size=PATCH_SIZE, emb_size=HIDDEN_DIM, num_classes=9):
-        super()._init_()
-        self.patch_embed = PatchEmbedding(patch_size=patch_size, emb_size=emb_size)
-        self.word_embed = nn.Identity()
-        self.concat = FeatureFusion()
-        self.scale_transform = ScaleTransformation(emb_size * 2, emb_size)
-        self.channel_unification = ChannelUnification(emb_size)
-        self.interaction_blocks = nn.Sequential(
-            *[InteractionBlock(emb_size, NUM_HEADS) for _ in range(NUM_LAYERS)]
-        )
-        # ❌ Hapus CSA karena tidak ada di checkpoint
-        self.head = HamburgerHead(emb_size, emb_size)
-        self.classifier = MLPClassifier(in_dim=emb_size, num_classes=num_classes, hidden_dim=256)
-
-    def forward(self, image):
-        B = image.size(0)
-        dummy_text = torch.randn(B, 1, HIDDEN_DIM).to(image.device)
-        image_feat = self.patch_embed(image)
-        x = self.concat(image_feat, dummy_text)
-        x = self.scale_transform(x)
-        x = self.channel_unification(x)
-        x = self.interaction_blocks(x)
-        x = self.head(x)
-        x = x.mean(dim=1)
-        return self.classifier(x)
-
 # --- 4. Load Model ---
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 try:
@@ -167,7 +140,7 @@ try:
         emb_size=HIDDEN_DIM,
         num_classes=len(LABELS)
     ).to(device)
-    model.load_state_dict(state_dict, strict=True)  # sekarang HARUS cocok
+    model.load_state_dict(state_dict, strict=True)
     model.eval()
 except Exception as e:
     st.error(f"❌ Gagal memuat model: {e}")
@@ -195,16 +168,18 @@ if uploaded_file is not None:
         outputs = model(input_tensor)
         probs = torch.sigmoid(outputs).cpu().numpy()[0].tolist()
 
-    detected_labels = [(label, prob) for label, prob in zip(LABELS, probs) if prob >= THRESHOLD]
-    detected_labels.sort(key=lambda x: x[1], reverse=True)
+    # Urutkan semua label dari skor tertinggi ke terendah
+    all_labels_sorted = sorted(zip(LABELS, probs), key=lambda x: x[1], reverse=True)
 
-    st.subheader("🔍 Label Terdeteksi:")
+    st.subheader("🔍 Semua Label:")
+    for label, prob in all_labels_sorted:
+        if prob >= THRESHOLD:
+            st.write(f"✅ **{label}** ({prob:.2%}) ← di atas ambang")
+        else:
+            st.write(f"⚠️ {label} ({prob:.2%})")
+
+    detected_labels = [(label, prob) for label, prob in all_labels_sorted if prob >= THRESHOLD]
     if detected_labels:
-        for label, prob in detected_labels:
-            st.write(f"✅ *{label}* ({prob:.2%})")
+        st.success(f"Label > {THRESHOLD:.0%}: " + ", ".join([f"{lbl} ({p:.1%})" for lbl, p in detected_labels]))
     else:
-        st.warning("🚫 Gambar tidak mengandung buah yang dikenali.")
-
-    with st.expander("📊 Lihat Semua Probabilitas"):
-        for label, prob in zip(LABELS, probs):
-            st.write(f"{label}: {prob:.2%}")
+        st.warning("🚫 Tidak ada label yang melewati ambang batas.")
