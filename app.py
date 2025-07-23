@@ -187,7 +187,7 @@ if uploaded_file is not None:
     # ✅ Kalau >=2 label >0.5 → VALID buah
     # ✅ Kalau semua label < threshold → OOD
     # ✅ Kalau cuma 1 label dominan → OOD
-    high_conf_count = len([p for p in probs if p > 0.5])
+    high_conf_count = len([p for p in probs if p > 0.2])
     is_ood = (high_conf_count < 2)
 
 
