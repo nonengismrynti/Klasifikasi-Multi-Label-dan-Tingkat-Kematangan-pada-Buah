@@ -18,11 +18,11 @@ LABELS = [
     'mangga', 'mangga_matang', 'mangga_mentah'
 ]
 
-# ✅ Sesuaikan dengan training config
-HIDDEN_DIM = 640
+# ✅ Sesuaikan dengan checkpoint (bukan training param lama)
+HIDDEN_DIM = 768     # HARUS sama seperti checkpoint
 PATCH_SIZE = 14
 IMAGE_SIZE = 210
-NUM_HEADS = 10
+NUM_HEADS = 12       # 768 / 12 = 64 -> valid
 NUM_LAYERS = 4
 THRESHOLD = 0.30
 
@@ -142,7 +142,7 @@ class HSVLTModel(nn.Module):
 
     def forward(self, image):
         B = image.size(0)
-        dummy_text = torch.randn(B, 1, HIDDEN_DIM).to(image.device)  # ✅ pakai 640
+        dummy_text = torch.randn(B, 1, HIDDEN_DIM).to(image.device)  # pakai 768
         image_feat = self.patch_embed(image)
         x = self.concat(image_feat, dummy_text)
         x = self.scale_transform(x)
@@ -164,7 +164,7 @@ try:
         emb_size=HIDDEN_DIM,
         num_classes=len(LABELS)
     ).to(device)
-    model.load_state_dict(state_dict, strict=False)  # ✅ sekarang dimensi cocok
+    model.load_state_dict(state_dict, strict=True)  # sekarang harus cocok
     model.eval()
 except Exception as e:
     st.error(f"❌ Gagal memuat model: {e}")
