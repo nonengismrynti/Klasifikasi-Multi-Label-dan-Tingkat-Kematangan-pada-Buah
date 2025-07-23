@@ -6,6 +6,7 @@ import torchvision.transforms as transforms
 from PIL import Image
 import gdown
 import os
+import math
 
 # --- 1. Setup ---
 MODEL_URL = 'https://drive.google.com/uc?id=1OB3XnCwW2MiEAzPJDMO9bD50_6qG4aR_'
@@ -17,12 +18,12 @@ LABELS = [
     'mangga', 'mangga_matang', 'mangga_mentah'
 ]
 
-# ✅ Parameter sesuai training checkpoint
-HIDDEN_DIM = 640
+# ✅ Pakai parameter asli training
+HIDDEN_DIM = 768   # sesuai checkpoint
 PATCH_SIZE = 14
 IMAGE_SIZE = 210
-NUM_HEADS = 10     # 640/10 = 64 per head
-NUM_LAYERS = 4     # checkpoint punya 4 layers
+NUM_HEADS = 12     # 768/12 = 64 per-head
+NUM_LAYERS = 2     # checkpoint hanya punya 2 layer!
 THRESHOLD = 0.30
 
 # --- 2. Download model ---
@@ -133,22 +134,13 @@ device = 'cuda' if torch.cuda.is_available() else 'cpu'
 try:
     with safe_open(MODEL_PATH, framework="pt", device=device) as f:
         state_dict = {k: f.get_tensor(k) for k in f.keys()}
-
     model = HSVLTModel(
         patch_size=PATCH_SIZE,
         emb_size=HIDDEN_DIM,
         num_classes=len(LABELS)
     ).to(device)
-
-    # ✅ Load dengan strict=False supaya key mismatch diabaikan
-    missing, unexpected = model.load_state_dict(state_dict, strict=False)
-    if missing:
-        st.warning(f"⚠️ Missing keys saat load model: {missing}")
-    if unexpected:
-        st.warning(f"⚠️ Unexpected keys saat load model: {unexpected}")
-
+    model.load_state_dict(state_dict, strict=True)
     model.eval()
-
 except Exception as e:
     st.error(f"❌ Gagal memuat model: {e}")
     st.stop()
@@ -160,8 +152,8 @@ transform = transforms.Compose([
 ])
 
 # --- 6. Streamlit UI ---
-st.title("🍉 Klasifikasi Multilabel Buah")
-st.write("Upload gambar buah, sistem akan mendeteksi beberapa label sekaligus.")
+st.title("🍉 Klasifikasi Multilabel Buah (dengan OOD Detection)")
+st.write("Upload gambar buah, sistem akan mendeteksi beberapa label sekaligus. Jika bukan buah, akan ditolak.")
 
 uploaded_file = st.file_uploader("Unggah gambar buah", type=['jpg', 'jpeg', 'png'])
 
@@ -169,34 +161,45 @@ if uploaded_file is not None:
     image = Image.open(uploaded_file).convert('RGB')
     st.image(image, caption="Gambar Input", use_container_width=True)
 
-    # 🔹 Transform dan prediksi
     input_tensor = transform(image).unsqueeze(0).to(device)
+
     with torch.no_grad():
         outputs = model(input_tensor)
         probs = torch.sigmoid(outputs).cpu().numpy()[0].tolist()
 
-    # 🔹 Hitung statistik probabilitas
+    # Ambil label di atas threshold
+    detected_labels = [(label, prob) for label, prob in zip(LABELS, probs) if prob >= THRESHOLD]
+    detected_labels.sort(key=lambda x: x[1], reverse=True)
+
+    # ====== OOD Detection lebih ketat ======
     max_prob = max(probs)
     sorted_probs = sorted(probs, reverse=True)
     second_max_prob = sorted_probs[1] if len(sorted_probs) > 1 else 0.0
     mean_prob = sum(probs) / len(probs)
-    high_conf_labels = [p for p in probs if p > 0.5]
+    high_conf_labels = [(lbl, p) for lbl, p in zip(LABELS, probs) if p > 0.5]
 
-    # 🔹 Ambil label di atas threshold
-    detected_labels = [(label, prob) for label, prob in zip(LABELS, probs) if prob >= THRESHOLD]
-    detected_labels.sort(key=lambda x: x[1], reverse=True)
+    # Hitung entropy → seberapa "yakin"
+    entropy = -sum([p * math.log(p + 1e-8) for p in probs]) / len(probs)
+
+    # Group check → hanya 1 jenis buah?
+    fruit_groups = {
+        "alpukat": ["alpukat", "alpukat_matang", "alpukat_mentah"],
+        "belimbing": ["belimbing", "belimbing_matang", "belimbing_mentah"],
+        "mangga": ["mangga", "mangga_matang", "mangga_mentah"]
+    }
+    group_conf_sum = {g: sum([probs[LABELS.index(lbl)] for lbl in labels]) for g, labels in fruit_groups.items()}
+    dominant_group = max(group_conf_sum, key=group_conf_sum.get)
+
+    # RULES OOD
+    is_ood = (
+        (group_conf_sum[dominant_group] > 0.9 and sum(group_conf_sum.values()) - group_conf_sum[dominant_group] < 0.1)
+        or (entropy < 0.05)
+        or (mean_prob < 0.15)
+        or (max_prob > 0.9 and len(set([lbl.split('_')[0] for lbl, _ in high_conf_labels])) == 1)
+    )
 
     st.subheader("🔍 Label Terdeteksi:")
-
-    # ✅ RULES OOD:
-    # 1) hanya 1 label yang tinggi sekali tapi lainnya sangat rendah → OOD
-    # 2) mean_prob terlalu rendah → OOD
-    # 3) jumlah label >0.5 kurang dari 2 → OOD
-    if (
-        (max_prob > 0.9 and second_max_prob < 0.1) or  # hanya 1 label mendominasi → aneh
-        (mean_prob < 0.2) or                          # rata-rata sangat rendah → OOD
-        (len(high_conf_labels) < 2)                   # hanya 1 label > 0.5 → OOD
-    ):
+    if is_ood:
         st.warning("🚫 Gambar tidak mengandung buah yang dikenali.")
     else:
         if detected_labels:
@@ -205,9 +208,7 @@ if uploaded_file is not None:
         else:
             st.warning("🚫 Tidak ada label yang melewati ambang batas.")
 
-    # ✅ Tetap tampilkan semua probabilitas untuk debugging
+    # Debugging
     with st.expander("📊 Lihat Semua Probabilitas"):
         for label, prob in zip(LABELS, probs):
             st.write(f"{label}: {prob:.2%}")
-
-
