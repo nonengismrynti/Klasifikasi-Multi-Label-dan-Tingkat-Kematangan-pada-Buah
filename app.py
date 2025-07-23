@@ -18,10 +18,11 @@ LABELS = [
 ]
 
 # ✅ Pakai parameter asli training
-HIDDEN_DIM = 640
+# ✅ Pakai parameter asli training (dari checkpoint)
+HIDDEN_DIM = 768   # <--- HARUS 768 sesuai error checkpoint
 PATCH_SIZE = 14
 IMAGE_SIZE = 210
-NUM_HEADS = 10
+NUM_HEADS = 12     # kemungkinan 12 heads kalau dim 768
 NUM_LAYERS = 4
 THRESHOLD = 0.30
 
