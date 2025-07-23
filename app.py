@@ -183,17 +183,14 @@ if uploaded_file is not None:
     import math
     entropy = -sum([p * math.log(p + 1e-8) for p in probs]) / len(probs)
 
-    # RULES:
-    # 1) rata-rata terlalu rendah → OOD
-    # 2) hanya 1 label sangat tinggi tapi lainnya sangat rendah → OOD
-    # 3) jumlah label >0.7 kurang dari 2 → OOD
-    # 4) entropy terlalu tinggi → OOD
-    is_ood = (
-        (mean_prob < 0.4) or
-        (max_prob > 0.9 and second_max_prob < 0.3) or
-        (len(high_conf_labels) < 2) or
-        (entropy > 0.8)
-    )
+    # RULES OOD lebih adaptif:
+    # ✅ Kalau >=2 label >0.5 → VALID buah
+    # ✅ Kalau semua label < threshold → OOD
+    # ✅ Kalau cuma 1 label dominan → OOD
+    high_conf_count = len([p for p in probs if p > 0.5])
+    is_ood = (high_conf_count < 2)
+
+
 
     st.subheader("🔍 Label Terdeteksi:")
 
