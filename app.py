@@ -179,15 +179,16 @@ if uploaded_file is not None:
     detected_labels = [(label, prob) for label, prob in zip(LABELS, probs) if prob >= THRESHOLD]
     detected_labels.sort(key=lambda x: x[1], reverse=True)
 
-    # ✅ Hitung confidence tambahan
+    # ✅ Hitung statistik tambahan
     max_prob = max(probs)
     mean_prob = sum(probs) / len(probs)
+    high_conf_labels = [p for p in probs if p > 0.6]
 
     st.subheader("🔍 Label Terdeteksi:")
 
-    # ✅ Jika semua confidence rendah → bukan buah
-    if (max_prob < 0.6) or (mean_prob < 0.2):
-        st.warning("🚫 Gambar tidak mengandung buah yang dikenali.")
+    # ✅ RULE: Jika terlalu sedikit label yang masuk, atau confidence aneh → anggap OOD
+    if (max_prob < 0.6) or (mean_prob < 0.15) or len(high_conf_labels) <= 1:
+        st.warning("🚫 Tidak ada label yang melewati ambang batas.")
     else:
         if detected_labels:
             for label, prob in detected_labels:
@@ -195,8 +196,8 @@ if uploaded_file is not None:
         else:
             st.warning("🚫 Tidak ada label yang melewati ambang batas.")
 
-    # ✅ Tampilkan semua probabilitas untuk debug
+    # ✅ Tetap tampilkan semua probabilitas untuk debugging
     with st.expander("📊 Lihat Semua Probabilitas"):
         for label, prob in zip(LABELS, probs):
             st.write(f"{label}: {prob:.2%}")
-            
+
