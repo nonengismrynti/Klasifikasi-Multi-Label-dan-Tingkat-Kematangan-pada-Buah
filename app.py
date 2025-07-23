@@ -18,13 +18,13 @@ LABELS = [
     'mangga', 'mangga_matang', 'mangga_mentah'
 ]
 
-# ✅ Pakai parameter asli training
-HIDDEN_DIM = 768   # sesuai checkpoint
-PATCH_SIZE = 14
-IMAGE_SIZE = 210
-NUM_HEADS = 12     # 768/12 = 64 per-head
-NUM_LAYERS = 2     # checkpoint hanya punya 2 layer!
-THRESHOLD = 0.30
+# ✅ Gunakan parameter eksperimen 7
+HIDDEN_DIM   = 640
+PATCH_SIZE   = 14
+IMAGE_SIZE   = 210
+NUM_HEADS    = 10   # 640/10 = 64 per-head
+NUM_LAYERS   = 4
+THRESHOLD    = 0.30
 
 # --- 2. Download model ---
 def download_model():
@@ -139,6 +139,7 @@ try:
         emb_size=HIDDEN_DIM,
         num_classes=len(LABELS)
     ).to(device)
+    # ✅ Pastikan strict=True karena shape sudah cocok
     model.load_state_dict(state_dict, strict=True)
     model.eval()
 except Exception as e:
@@ -152,7 +153,7 @@ transform = transforms.Compose([
 ])
 
 # --- 6. Streamlit UI ---
-st.title("🍉 Klasifikasi Multilabel Buah (dengan OOD Detection)")
+st.title("🍉 Klasifikasi Multilabel Buah (Eksperimen 7)")
 st.write("Upload gambar buah, sistem akan mendeteksi beberapa label sekaligus. Jika bukan buah, akan ditolak.")
 
 uploaded_file = st.file_uploader("Unggah gambar buah", type=['jpg', 'jpeg', 'png'])
@@ -171,31 +172,21 @@ if uploaded_file is not None:
     detected_labels = [(label, prob) for label, prob in zip(LABELS, probs) if prob >= THRESHOLD]
     detected_labels.sort(key=lambda x: x[1], reverse=True)
 
-    # ====== OOD Detection lebih ketat ======
+    # --- OOD DETECTION ---
     max_prob = max(probs)
     sorted_probs = sorted(probs, reverse=True)
     second_max_prob = sorted_probs[1] if len(sorted_probs) > 1 else 0.0
     mean_prob = sum(probs) / len(probs)
     high_conf_labels = [(lbl, p) for lbl, p in zip(LABELS, probs) if p > 0.5]
 
-    # Hitung entropy → seberapa "yakin"
-    entropy = -sum([p * math.log(p + 1e-8) for p in probs]) / len(probs)
-
-    # Group check → hanya 1 jenis buah?
-    fruit_groups = {
-        "alpukat": ["alpukat", "alpukat_matang", "alpukat_mentah"],
-        "belimbing": ["belimbing", "belimbing_matang", "belimbing_mentah"],
-        "mangga": ["mangga", "mangga_matang", "mangga_mentah"]
-    }
-    group_conf_sum = {g: sum([probs[LABELS.index(lbl)] for lbl in labels]) for g, labels in fruit_groups.items()}
-    dominant_group = max(group_conf_sum, key=group_conf_sum.get)
-
-    # RULES OOD
+    # RULES:
+    # 1) hanya 1 label yang mendominasi tinggi → OOD
+    # 2) rata-rata sangat rendah → OOD
+    # 3) hanya 1 label > 0.5 → OOD
     is_ood = (
-        (group_conf_sum[dominant_group] > 0.9 and sum(group_conf_sum.values()) - group_conf_sum[dominant_group] < 0.1)
-        or (entropy < 0.05)
-        or (mean_prob < 0.15)
-        or (max_prob > 0.9 and len(set([lbl.split('_')[0] for lbl, _ in high_conf_labels])) == 1)
+        (max_prob > 0.9 and second_max_prob < 0.1) or
+        (mean_prob < 0.2) or
+        (len(high_conf_labels) < 2)
     )
 
     st.subheader("🔍 Label Terdeteksi:")
