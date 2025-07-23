@@ -169,20 +169,20 @@ if uploaded_file is not None:
     image = Image.open(uploaded_file).convert('RGB')
     st.image(image, caption="Gambar Input", use_container_width=True)
 
+    # 🔹 Transform dan prediksi
     input_tensor = transform(image).unsqueeze(0).to(device)
-
     with torch.no_grad():
         outputs = model(input_tensor)
         probs = torch.sigmoid(outputs).cpu().numpy()[0].tolist()
 
-    # --- Ambil statistik probabilitas ---
+    # 🔹 Hitung statistik probabilitas
     max_prob = max(probs)
     sorted_probs = sorted(probs, reverse=True)
     second_max_prob = sorted_probs[1] if len(sorted_probs) > 1 else 0.0
     mean_prob = sum(probs) / len(probs)
     high_conf_labels = [p for p in probs if p > 0.5]
 
-    # Ambil label di atas threshold
+    # 🔹 Ambil label di atas threshold
     detected_labels = [(label, prob) for label, prob in zip(LABELS, probs) if prob >= THRESHOLD]
     detected_labels.sort(key=lambda x: x[1], reverse=True)
 
@@ -209,4 +209,5 @@ if uploaded_file is not None:
     with st.expander("📊 Lihat Semua Probabilitas"):
         for label, prob in zip(LABELS, probs):
             st.write(f"{label}: {prob:.2%}")
+
 
