@@ -169,16 +169,21 @@ if uploaded_file is not None:
         outputs = model(input_tensor)
         probs = torch.sigmoid(outputs).cpu().numpy()[0].tolist()
 
-    detected_labels = [(label, prob) for label, prob in zip(LABELS, probs) if prob >= THRESHOLD]
-    detected_labels.sort(key=lambda x: x[1], reverse=True)
+    # Urutkan semua label dari skor tertinggi ke terendah
+    all_labels_sorted = sorted(zip(LABELS, probs), key=lambda x: x[1], reverse=True)
 
-    st.subheader("🔍 Label Terdeteksi:")
+    st.subheader("🔍 Semua Label (urut dari paling yakin):")
+    for label, prob in all_labels_sorted:
+        if prob >= THRESHOLD:
+            st.write(f"✅ **{label}** ({prob:.2%})  ← di atas ambang")
+        else:
+            st.write(f"⚠️ {label} ({prob:.2%})")
+
+    # Hanya label yang > threshold
+    detected_labels = [(label, prob) for label, prob in all_labels_sorted if prob >= THRESHOLD]
+
     if detected_labels:
-        for label, prob in detected_labels:
-            st.write(f"✅ **{label}** ({prob:.2%})")
+        st.success(f"Label di atas ambang batas ({THRESHOLD:.0%}): " +
+                   ", ".join([f"{lbl} ({p:.1%})" for lbl, p in detected_labels]))
     else:
-        st.warning("🚫 Gambar tidak mengandung buah yang dikenali.")
-
-    with st.expander("📊 Lihat Semua Probabilitas"):
-        for label, prob in zip(LABELS, probs):
-            st.write(f"{label}: {prob:.2%}")
+        st.warning("🚫 Tidak ada label yang melewati ambang batas.")
