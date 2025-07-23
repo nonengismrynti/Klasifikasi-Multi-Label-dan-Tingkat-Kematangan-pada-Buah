@@ -1,7 +1,6 @@
 import streamlit as st
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from safetensors.torch import safe_open
 import torchvision.transforms as transforms
 from PIL import Image
@@ -104,7 +103,7 @@ class MLPClassifier(nn.Module):
         return self.mlp(x)
 
 class HSVLTModel(nn.Module):
-    def __init__(self, img_size=IMAGE_SIZE, patch_size=PATCH_SIZE, emb_size=HIDDEN_DIM, num_classes=9):
+    def __init__(self, patch_size=PATCH_SIZE, emb_size=HIDDEN_DIM, num_classes=9):
         super().__init__()
         self.patch_embed = PatchEmbedding(patch_size=patch_size, emb_size=emb_size)
         self.word_embed = nn.Identity()
@@ -129,46 +128,17 @@ class HSVLTModel(nn.Module):
         x = x.mean(dim=1)
         return self.classifier(x)
 
-
-class HSVLTModel(nn.Module):
-    def _init_(self, img_size=IMAGE_SIZE, patch_size=PATCH_SIZE, emb_size=HIDDEN_DIM, num_classes=9):
-        super()._init_()
-        self.patch_embed = PatchEmbedding(patch_size=patch_size, emb_size=emb_size)
-        self.word_embed = nn.Identity()
-        self.concat = FeatureFusion()
-        self.scale_transform = ScaleTransformation(emb_size * 2, emb_size)
-        self.channel_unification = ChannelUnification(emb_size)
-        self.interaction_blocks = nn.Sequential(
-            *[InteractionBlock(emb_size, NUM_HEADS) for _ in range(NUM_LAYERS)]
-        )
-        # ❌ Hapus CSA karena tidak ada di checkpoint
-        self.head = HamburgerHead(emb_size, emb_size)
-        self.classifier = MLPClassifier(in_dim=emb_size, num_classes=num_classes, hidden_dim=256)
-
-    def forward(self, image):
-        B = image.size(0)
-        dummy_text = torch.randn(B, 1, HIDDEN_DIM).to(image.device)
-        image_feat = self.patch_embed(image)
-        x = self.concat(image_feat, dummy_text)
-        x = self.scale_transform(x)
-        x = self.channel_unification(x)
-        x = self.interaction_blocks(x)
-        x = self.head(x)
-        x = x.mean(dim=1)
-        return self.classifier(x)
-
 # --- 4. Load Model ---
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 try:
     with safe_open(MODEL_PATH, framework="pt", device=device) as f:
         state_dict = {k: f.get_tensor(k) for k in f.keys()}
     model = HSVLTModel(
-        img_size=IMAGE_SIZE,
         patch_size=PATCH_SIZE,
         emb_size=HIDDEN_DIM,
         num_classes=len(LABELS)
     ).to(device)
-    model.load_state_dict(state_dict, strict=True)  # sekarang HARUS cocok
+    model.load_state_dict(state_dict, strict=True)
     model.eval()
 except Exception as e:
     st.error(f"❌ Gagal memuat model: {e}")
