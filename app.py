@@ -177,19 +177,26 @@ if uploaded_file is not None:
     sorted_probs = sorted(probs, reverse=True)
     second_max_prob = sorted_probs[1] if len(sorted_probs) > 1 else 0.0
     mean_prob = sum(probs) / len(probs)
-    high_conf_labels = [(lbl, p) for lbl, p in zip(LABELS, probs) if p > 0.5]
+    high_conf_labels = [(lbl, p) for lbl, p in zip(LABELS, probs) if p > 0.7]
+
+    # ✅ Hitung "entropy" prediksi → makin tinggi berarti OOD
+    import math
+    entropy = -sum([p * math.log(p + 1e-8) for p in probs]) / len(probs)
 
     # RULES:
-    # 1) hanya 1 label yang mendominasi tinggi → OOD
-    # 2) rata-rata sangat rendah → OOD
-    # 3) hanya 1 label > 0.5 → OOD
+    # 1) rata-rata terlalu rendah → OOD
+    # 2) hanya 1 label sangat tinggi tapi lainnya sangat rendah → OOD
+    # 3) jumlah label >0.7 kurang dari 2 → OOD
+    # 4) entropy terlalu tinggi → OOD
     is_ood = (
-        (max_prob > 0.9 and second_max_prob < 0.1) or
-        (mean_prob < 0.2) or
-        (len(high_conf_labels) < 2)
+        (mean_prob < 0.4) or
+        (max_prob > 0.9 and second_max_prob < 0.3) or
+        (len(high_conf_labels) < 2) or
+        (entropy > 0.8)
     )
 
     st.subheader("🔍 Label Terdeteksi:")
+
     if is_ood:
         st.warning("🚫 Gambar tidak mengandung buah yang dikenali.")
     else:
@@ -199,7 +206,9 @@ if uploaded_file is not None:
         else:
             st.warning("🚫 Tidak ada label yang melewati ambang batas.")
 
-    # Debugging
+    # ✅ Debugging
     with st.expander("📊 Lihat Semua Probabilitas"):
+        st.write(f"📊 mean_prob: {mean_prob:.3f} | entropy: {entropy:.3f}")
         for label, prob in zip(LABELS, probs):
             st.write(f"{label}: {prob:.2%}")
+
