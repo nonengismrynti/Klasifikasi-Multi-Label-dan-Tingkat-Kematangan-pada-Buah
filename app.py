@@ -175,20 +175,29 @@ if uploaded_file is not None:
         outputs = model(input_tensor)
         probs = torch.sigmoid(outputs).cpu().numpy()[0].tolist()
 
+    # --- Ambil statistik probabilitas ---
+    max_prob = max(probs)
+    sorted_probs = sorted(probs, reverse=True)
+    second_max_prob = sorted_probs[1] if len(sorted_probs) > 1 else 0.0
+    mean_prob = sum(probs) / len(probs)
+    high_conf_labels = [p for p in probs if p > 0.5]
+
     # Ambil label di atas threshold
     detected_labels = [(label, prob) for label, prob in zip(LABELS, probs) if prob >= THRESHOLD]
     detected_labels.sort(key=lambda x: x[1], reverse=True)
 
-    # ✅ Hitung statistik tambahan
-    max_prob = max(probs)
-    mean_prob = sum(probs) / len(probs)
-    high_conf_labels = [p for p in probs if p > 0.6]
-
     st.subheader("🔍 Label Terdeteksi:")
 
-    # ✅ RULE: Jika terlalu sedikit label yang masuk, atau confidence aneh → anggap OOD
-    if (max_prob < 0.6) or (mean_prob < 0.15) or len(high_conf_labels) <= 1:
-        st.warning("🚫 Tidak ada label yang melewati ambang batas.")
+    # ✅ RULES OOD:
+    # 1) hanya 1 label yang tinggi sekali tapi lainnya sangat rendah → OOD
+    # 2) mean_prob terlalu rendah → OOD
+    # 3) jumlah label >0.5 kurang dari 2 → OOD
+    if (
+        (max_prob > 0.9 and second_max_prob < 0.1) or  # hanya 1 label mendominasi → aneh
+        (mean_prob < 0.2) or                          # rata-rata sangat rendah → OOD
+        (len(high_conf_labels) < 2)                   # hanya 1 label > 0.5 → OOD
+    ):
+        st.warning("🚫 Gambar tidak mengandung buah yang dikenali.")
     else:
         if detected_labels:
             for label, prob in detected_labels:
