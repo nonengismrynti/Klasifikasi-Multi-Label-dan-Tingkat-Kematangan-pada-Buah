@@ -171,7 +171,7 @@ if uploaded_file is not None:
     # Urutkan semua label dari skor tertinggi ke terendah
     all_labels_sorted = sorted(zip(LABELS, probs), key=lambda x: x[1], reverse=True)
 
-    st.subheader("🔍 Semua Label:")
+    st.subheader("🔍 Label Terdeteksi:")
     for label, prob in all_labels_sorted:
         if prob >= THRESHOLD:
             st.write(f"✅ **{label}** ({prob:.2%}) ← di atas ambang")
