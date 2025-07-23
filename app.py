@@ -39,8 +39,8 @@ if not os.path.exists(MODEL_PATH) or os.path.getsize(MODEL_PATH) < 50000:
 
 # --- 3. Komponen Model ---
 class PatchEmbedding(nn.Module):
-    def __init__(self, in_channels=3, patch_size=PATCH_SIZE, emb_size=HIDDEN_DIM):
-        super().__init__()
+    def _init_(self, in_channels=3, patch_size=PATCH_SIZE, emb_size=HIDDEN_DIM):
+        super()._init_()
         self.proj = nn.Conv2d(in_channels, emb_size, kernel_size=patch_size, stride=patch_size)
 
     def forward(self, x):
@@ -50,8 +50,8 @@ class PatchEmbedding(nn.Module):
         return x
 
 class FeatureFusion(nn.Module):
-    def __init__(self):
-        super().__init__()
+    def _init_(self):
+        super()._init_()
 
     def forward(self, visual_embed, text_embed):
         text_expand = text_embed.mean(dim=1, keepdim=True).repeat(1, visual_embed.size(1), 1)
@@ -59,24 +59,24 @@ class FeatureFusion(nn.Module):
         return fused
 
 class ScaleTransformation(nn.Module):
-    def __init__(self, in_dim, out_dim):
-        super().__init__()
+    def _init_(self, in_dim, out_dim):
+        super()._init_()
         self.linear = nn.Linear(in_dim, out_dim)
 
     def forward(self, x):
         return self.linear(x)
 
 class ChannelUnification(nn.Module):
-    def __init__(self, dim):
-        super().__init__()
+    def _init_(self, dim):
+        super()._init_()
         self.norm = nn.LayerNorm(dim)
 
     def forward(self, x):
         return self.norm(x)
 
 class InteractionBlock(nn.Module):
-    def __init__(self, dim, num_heads=NUM_HEADS):
-        super().__init__()
+    def _init_(self, dim, num_heads=NUM_HEADS):
+        super()._init_()
         self.attn = nn.MultiheadAttention(embed_dim=dim, num_heads=num_heads, batch_first=True)
 
     def forward(self, x):
@@ -84,16 +84,16 @@ class InteractionBlock(nn.Module):
         return attn_output
 
 class HamburgerHead(nn.Module):
-    def __init__(self, in_dim, out_dim):
-        super().__init__()
+    def _init_(self, in_dim, out_dim):
+        super()._init_()
         self.linear = nn.Linear(in_dim, out_dim)
 
     def forward(self, x):
         return self.linear(x)
 
 class MLPClassifier(nn.Module):
-    def __init__(self, in_dim=HIDDEN_DIM, num_classes=9, hidden_dim=256):
-        super().__init__()
+    def _init_(self, in_dim=HIDDEN_DIM, num_classes=9, hidden_dim=256):
+        super()._init_()
         self.mlp = nn.Sequential(
             nn.Linear(in_dim, hidden_dim),
             nn.ReLU(),
@@ -104,8 +104,8 @@ class MLPClassifier(nn.Module):
         return self.mlp(x)
 
 class HSVLTModel(nn.Module):
-    def __init__(self, img_size=IMAGE_SIZE, patch_size=PATCH_SIZE, emb_size=HIDDEN_DIM, num_classes=9):
-        super().__init__()
+    def _init_(self, img_size=IMAGE_SIZE, patch_size=PATCH_SIZE, emb_size=HIDDEN_DIM, num_classes=9):
+        super()._init_()
         self.patch_embed = PatchEmbedding(patch_size=patch_size, emb_size=emb_size)
         self.word_embed = nn.Identity()
         self.concat = FeatureFusion()
@@ -169,21 +169,16 @@ if uploaded_file is not None:
         outputs = model(input_tensor)
         probs = torch.sigmoid(outputs).cpu().numpy()[0].tolist()
 
-    # Urutkan semua label dari skor tertinggi ke terendah
-    all_labels_sorted = sorted(zip(LABELS, probs), key=lambda x: x[1], reverse=True)
+    detected_labels = [(label, prob) for label, prob in zip(LABELS, probs) if prob >= THRESHOLD]
+    detected_labels.sort(key=lambda x: x[1], reverse=True)
 
-    st.subheader("🔍 Semua Label (urut dari paling yakin):")
-    for label, prob in all_labels_sorted:
-        if prob >= THRESHOLD:
-            st.write(f"✅ **{label}** ({prob:.2%})  ← di atas ambang")
-        else:
-            st.write(f"⚠️ {label} ({prob:.2%})")
-
-    # Hanya label yang > threshold
-    detected_labels = [(label, prob) for label, prob in all_labels_sorted if prob >= THRESHOLD]
-
+    st.subheader("🔍 Label Terdeteksi:")
     if detected_labels:
-        st.success(f"Label di atas ambang batas ({THRESHOLD:.0%}): " +
-                   ", ".join([f"{lbl} ({p:.1%})" for lbl, p in detected_labels]))
+        for label, prob in detected_labels:
+            st.write(f"✅ *{label}* ({prob:.2%})")
     else:
-        st.warning("🚫 Tidak ada label yang melewati ambang batas.")
+        st.warning("🚫 Gambar tidak mengandung buah yang dikenali.")
+
+    with st.expander("📊 Lihat Semua Probabilitas"):
+        for label, prob in zip(LABELS, probs):
+            st.write(f"{label}: {prob:.2%}")
