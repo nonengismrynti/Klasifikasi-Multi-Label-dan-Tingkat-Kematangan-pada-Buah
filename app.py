@@ -182,7 +182,7 @@ def multi_crop_inference(image, model, transform, device, crop_grid=2):
 
 # --- 6. Streamlit UI ---
 st.title("🍉 Klasifikasi Multilabel Buah")
-st.write("Upload gambar buah, sistem akan mendeteksi beberapa buah meskipun ada lebih dari satu objek.")
+st.write("Upload gambar buah dibawah ini.")
 
 uploaded_file = st.file_uploader("Unggah gambar buah", type=['jpg', 'jpeg', 'png'])
 
