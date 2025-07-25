@@ -139,6 +139,7 @@ try:
         emb_size=HIDDEN_DIM,
         num_classes=len(LABELS)
     ).to(device)
+    # ✅ Pastikan strict=True karena shape sudah cocok
     model.load_state_dict(state_dict, strict=True)
     model.eval()
 except Exception as e:
@@ -151,35 +152,9 @@ transform = transforms.Compose([
     transforms.ToTensor()
 ])
 
-# ✅ Multi-crop inference untuk mendeteksi lebih dari satu buah
-def multi_crop_inference(image, model, transform, device, crop_grid=2):
-    w, h = image.size
-    crop_w, crop_h = w // crop_grid, h // crop_grid
-
-    combined_probs = torch.zeros(len(LABELS))
-
-    for i in range(crop_grid):
-        for j in range(crop_grid):
-            left = j * crop_w
-            upper = i * crop_h
-            right = (j + 1) * crop_w
-            lower = (i + 1) * crop_h
-
-            crop = image.crop((left, upper, right, lower))
-            input_tensor = transform(crop).unsqueeze(0).to(device)
-
-            with torch.no_grad():
-                outputs = model(input_tensor)
-                probs = torch.sigmoid(outputs).cpu().squeeze(0)
-
-            # Gabungkan hasil → ambil max score per label
-            combined_probs = torch.max(combined_probs, probs)
-
-    return combined_probs.numpy().tolist()
-
 # --- 6. Streamlit UI ---
-st.title("🍉 Klasifikasi Multilabel Buah (Eksperimen 7 + Multi-Crop)")
-st.write("Upload gambar buah, sistem akan mendeteksi beberapa label sekaligus. Multi-crop membantu deteksi semua buah dalam satu gambar.")
+st.title("🍉 Klasifikasi Multilabel Buah")
+st.write("Upload gambar buah, sistem akan mendeteksi beberapa label sekaligus. Jika bukan buah, akan ditolak.")
 
 uploaded_file = st.file_uploader("Unggah gambar buah", type=['jpg', 'jpeg', 'png'])
 
@@ -187,8 +162,11 @@ if uploaded_file is not None:
     image = Image.open(uploaded_file).convert('RGB')
     st.image(image, caption="Gambar Input", use_container_width=True)
 
-    # ✅ Multi-crop inference (bagi gambar jadi 4 bagian)
-    probs = multi_crop_inference(image, model, transform, device, crop_grid=2)
+    input_tensor = transform(image).unsqueeze(0).to(device)
+
+    with torch.no_grad():
+        outputs = model(input_tensor)
+        probs = torch.sigmoid(outputs).cpu().numpy()[0].tolist()
 
     # Ambil label di atas threshold
     detected_labels = [(label, prob) for label, prob in zip(LABELS, probs) if prob >= THRESHOLD]
@@ -201,12 +179,18 @@ if uploaded_file is not None:
     mean_prob = sum(probs) / len(probs)
     high_conf_labels = [(lbl, p) for lbl, p in zip(LABELS, probs) if p > 0.7]
 
-    # Hitung entropy
+    # ✅ Hitung "entropy" prediksi → makin tinggi berarti OOD
+    import math
     entropy = -sum([p * math.log(p + 1e-8) for p in probs]) / len(probs)
 
     # RULES OOD lebih adaptif:
+    # ✅ Kalau >=2 label >0.5 → VALID buah
+    # ✅ Kalau semua label < threshold → OOD
+    # ✅ Kalau cuma 1 label dominan → OOD
     high_conf_count = len([p for p in probs if p > 0.2])
     is_ood = (high_conf_count < 2)
+
+
 
     st.subheader("🔍 Label Terdeteksi:")
 
