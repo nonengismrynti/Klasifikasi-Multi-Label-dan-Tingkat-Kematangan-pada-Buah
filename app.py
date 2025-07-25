@@ -151,16 +151,12 @@ transform = transforms.Compose([
     transforms.ToTensor()
 ])
 
-# --- NEW: Multi-crop inference ---
+# ✅ Multi-crop inference untuk mendeteksi lebih dari satu buah
 def multi_crop_inference(image, model, transform, device, crop_grid=2):
-    """
-    Membagi gambar menjadi beberapa bagian (grid) lalu prediksi tiap bagian.
-    Hasil akhir = max probability tiap label → bisa deteksi multi buah.
-    """
     w, h = image.size
     crop_w, crop_h = w // crop_grid, h // crop_grid
 
-    combined_probs = torch.zeros(len(LABELS))  # simpan max score
+    combined_probs = torch.zeros(len(LABELS))
 
     for i in range(crop_grid):
         for j in range(crop_grid):
@@ -176,13 +172,14 @@ def multi_crop_inference(image, model, transform, device, crop_grid=2):
                 outputs = model(input_tensor)
                 probs = torch.sigmoid(outputs).cpu().squeeze(0)
 
-            combined_probs = torch.max(combined_probs, probs)  # ambil max dari semua crop
+            # Gabungkan hasil → ambil max score per label
+            combined_probs = torch.max(combined_probs, probs)
 
     return combined_probs.numpy().tolist()
 
 # --- 6. Streamlit UI ---
-st.title("🍉 Klasifikasi Multilabel Buah")
-st.write("Upload gambar buah dibawah ini.")
+st.title("🍉 Klasifikasi Multilabel Buah (Eksperimen 7 + Multi-Crop)")
+st.write("Upload gambar buah, sistem akan mendeteksi beberapa label sekaligus. Multi-crop membantu deteksi semua buah dalam satu gambar.")
 
 uploaded_file = st.file_uploader("Unggah gambar buah", type=['jpg', 'jpeg', 'png'])
 
@@ -190,25 +187,40 @@ if uploaded_file is not None:
     image = Image.open(uploaded_file).convert('RGB')
     st.image(image, caption="Gambar Input", use_container_width=True)
 
-    # ✅ GUNAKAN multi-crop agar mendeteksi semua buah
+    # ✅ Multi-crop inference (bagi gambar jadi 4 bagian)
     probs = multi_crop_inference(image, model, transform, device, crop_grid=2)
 
     # Ambil label di atas threshold
     detected_labels = [(label, prob) for label, prob in zip(LABELS, probs) if prob >= THRESHOLD]
     detected_labels.sort(key=lambda x: x[1], reverse=True)
 
+    # --- OOD DETECTION ---
+    max_prob = max(probs)
+    sorted_probs = sorted(probs, reverse=True)
+    second_max_prob = sorted_probs[1] if len(sorted_probs) > 1 else 0.0
+    mean_prob = sum(probs) / len(probs)
+    high_conf_labels = [(lbl, p) for lbl, p in zip(LABELS, probs) if p > 0.7]
+
+    # Hitung entropy
+    entropy = -sum([p * math.log(p + 1e-8) for p in probs]) / len(probs)
+
+    # RULES OOD lebih adaptif:
+    high_conf_count = len([p for p in probs if p > 0.2])
+    is_ood = (high_conf_count < 2)
+
     st.subheader("🔍 Label Terdeteksi:")
 
-    if detected_labels:
-        for label, prob in detected_labels:
-            st.write(f"✅ **{label}** ({prob:.2%})")
+    if is_ood:
+        st.warning("🚫 Gambar tidak mengandung buah yang dikenali.")
     else:
-        st.warning("🚫 Tidak ada buah yang terdeteksi.")
+        if detected_labels:
+            for label, prob in detected_labels:
+                st.write(f"✅ *{label}* ({prob:.2%})")
+        else:
+            st.warning("🚫 Tidak ada label yang melewati ambang batas.")
 
-    # ✅ Debugging: tampilkan semua probabilitas
+    # ✅ Debugging
     with st.expander("📊 Lihat Semua Probabilitas"):
-        mean_prob = sum(probs) / len(probs)
-        entropy = -sum([p * math.log(p + 1e-8) for p in probs]) / len(probs)
         st.write(f"📊 mean_prob: {mean_prob:.3f} | entropy: {entropy:.3f}")
         for label, prob in zip(LABELS, probs):
             st.write(f"{label}: {prob:.2%}")
