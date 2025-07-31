@@ -169,8 +169,11 @@ if uploaded_file is not None:
 
     input_tensor = transform(image).unsqueeze(0).to(device)
 
+    # ✅ Tambahkan dummy text tensor agar sesuai input model
+    dummy_text = torch.zeros((1, (IMAGE_SIZE // PATCH_SIZE) ** 2, HIDDEN_DIM)).to(device)
+
     with torch.no_grad():
-        outputs = model(input_tensor)
+        outputs = model(input_tensor, dummy_text)  # ← perbaikan disini
         probs = torch.sigmoid(outputs).cpu().numpy()[0].tolist()
 
     # Ambil label di atas threshold
@@ -184,14 +187,11 @@ if uploaded_file is not None:
     mean_prob = sum(probs) / len(probs)
     high_conf_labels = [(lbl, p) for lbl, p in zip(LABELS, probs) if p > 0.7]
 
-    # ✅ Hitung "entropy" prediksi → makin tinggi berarti OOD
+
     import math
     entropy = -sum([p * math.log(p + 1e-8) for p in probs]) / len(probs)
 
-    # RULES OOD lebih adaptif:
-    # ✅ Kalau >=2 label >0.5 → VALID buah
-    # ✅ Kalau semua label < threshold → OOD
-    # ✅ Kalau cuma 1 label dominan → OOD
+
     high_conf_count = len([p for p in probs if p > 0.2])
     is_ood = (high_conf_count < 2)
 
