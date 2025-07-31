@@ -134,8 +134,11 @@ class HSVLTModel(nn.Module):
         x = x.mean(dim=1)                            # Agregasi fitur patch
         return self.classifier(x)                    # [B, num_classes]
 
+import traceback  # Tambahkan ini di atas file jika belum ada
+
 # --- 4. Load Model ---
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
+
 try:
     with safe_open(MODEL_PATH, framework="pt", device=device) as f:
         state_dict = {k: f.get_tensor(k) for k in f.keys()}
@@ -151,7 +154,9 @@ try:
 
 except Exception as e:
     st.error(f"❌ Gagal memuat model: {e}")
+    st.code(traceback.format_exc())  # ← tampilkan traceback asli di UI
     st.stop()
+
 
 
 # --- 5. Transformasi Gambar ---
