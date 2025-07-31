@@ -9,20 +9,20 @@ import os
 import math
 
 # --- 1. Setup ---
-MODEL_URL = 'https://drive.google.com/uc?id=1OB3XnCwW2MiEAzPJDMO9bD50_6qG4aR_'
-MODEL_PATH = 'model_1.safetensors'
+MODEL_URL = 'https://drive.google.com/uc?id=1PbHLaNkAToSVsVnkGo2N8DhAXyOqvd7F'
+MODEL_PATH = 'model_2.safetensors'
 
 LABELS = [
-    'alpukat', 'alpukat_matang', 'alpukat_mentah',
-    'belimbing', 'belimbing_matang', 'belimbing_mentah',
-    'mangga', 'mangga_matang', 'mangga_mentah'
+    'alpukat_matang', 'alpukat_mentah',
+    'belimbing_matang', 'belimbing_mentah',
+    'mangga_matang', 'mangga_mentah'
 ]
 
 # ✅ Gunakan parameter eksperimen 7
-HIDDEN_DIM   = 640
+HIDDEN_DIM   = 512
 PATCH_SIZE   = 14
 IMAGE_SIZE   = 210
-NUM_HEADS    = 10   # 640/10 = 64 per-head
+NUM_HEADS    = 8   
 NUM_LAYERS   = 4
 THRESHOLD    = 0.30
 
@@ -38,96 +38,101 @@ if not os.path.exists(MODEL_PATH) or os.path.getsize(MODEL_PATH) < 50000:
     download_model()
 
 # --- 3. Komponen Model ---
+# 🔹 Komponen Patch Embedding
 class PatchEmbedding(nn.Module):
-    def __init__(self, in_channels=3, patch_size=PATCH_SIZE, emb_size=HIDDEN_DIM):
+    def __init__(self, img_size, patch_size, emb_size):
         super().__init__()
-        self.proj = nn.Conv2d(in_channels, emb_size, kernel_size=patch_size, stride=patch_size)
+        self.proj = nn.Conv2d(3, emb_size, kernel_size=patch_size, stride=patch_size)
 
     def forward(self, x):
-        x = self.proj(x)
-        x = x.flatten(2)
-        x = x.transpose(1, 2)
+        x = self.proj(x)                          # [B, C, H/ps, W/ps]
+        x = x.flatten(2).transpose(1, 2)          # [B, num_patches, emb_size]
         return x
 
-class FeatureFusion(nn.Module):
-    def __init__(self):
+# 🔹 Komponen Word Embedding (sederhana → input dummy)
+class WordEmbedding(nn.Module):
+    def __init__(self, dim):
         super().__init__()
+    def forward(self, x): return x               # x = dummy_text [B, 225, 640]
 
-    def forward(self, visual_embed, text_embed):
-        text_expand = text_embed.mean(dim=1, keepdim=True).repeat(1, visual_embed.size(1), 1)
-        fused = torch.cat([visual_embed, text_expand], dim=-1)
-        return fused
+# 🔹 Gabungkan visual dan teks
+class FeatureFusion(nn.Module):
+    def forward(self, v, t):                     # v = visual [B, N, E], t = text [B, N, E]
+        return torch.cat([v, t[:, :v.size(1), :]], dim=-1)  # Gabung di dimensi fitur
 
+# 🔹 Scale Transformation
 class ScaleTransformation(nn.Module):
     def __init__(self, in_dim, out_dim):
         super().__init__()
         self.linear = nn.Linear(in_dim, out_dim)
+    def forward(self, x): return self.linear(x)
 
-    def forward(self, x):
-        return self.linear(x)
-
+# 🔹 Channel Normalisasi
 class ChannelUnification(nn.Module):
     def __init__(self, dim):
         super().__init__()
         self.norm = nn.LayerNorm(dim)
+    def forward(self, x): return self.norm(x)
 
-    def forward(self, x):
-        return self.norm(x)
-
+# 🔹 Attention Block
 class InteractionBlock(nn.Module):
-    def __init__(self, dim, num_heads=NUM_HEADS):
+    def __init__(self, dim, num_heads=8):
         super().__init__()
-        self.attn = nn.MultiheadAttention(embed_dim=dim, num_heads=num_heads, batch_first=True)
+        self.attn = nn.MultiheadAttention(dim, num_heads=num_heads, batch_first=True)
+    def forward(self, x): return self.attn(x, x, x)[0]
 
-    def forward(self, x):
-        attn_output, _ = self.attn(x, x, x)
-        return attn_output
+# 🔹 CSA Dummy (agregasi skala)
+class CrossScaleAggregation(nn.Module):
+    def forward(self, x): return x.mean(dim=1, keepdim=True)  # [B, 1, D]
 
+# 🔹 Linear Head
 class HamburgerHead(nn.Module):
     def __init__(self, in_dim, out_dim):
         super().__init__()
         self.linear = nn.Linear(in_dim, out_dim)
+    def forward(self, x): return self.linear(x)
 
-    def forward(self, x):
-        return self.linear(x)
-
+# 🔹 Multi-Label Classifier
 class MLPClassifier(nn.Module):
-    def __init__(self, in_dim=HIDDEN_DIM, num_classes=9, hidden_dim=256):
+    def __init__(self, in_dim, num_classes):
         super().__init__()
         self.mlp = nn.Sequential(
-            nn.Linear(in_dim, hidden_dim),
+            nn.Linear(in_dim, 256),
             nn.ReLU(),
-            nn.Linear(hidden_dim, num_classes)
+            nn.Linear(256, num_classes)
         )
+    def forward(self, x): return self.mlp(x)
 
-    def forward(self, x):
-        return self.mlp(x)
-
+# ✅ Gabungkan semuanya ke dalam HSVLTModel
 class HSVLTModel(nn.Module):
-    def __init__(self, patch_size=PATCH_SIZE, emb_size=HIDDEN_DIM, num_classes=9):
+    def __init__(self, img_size=210, patch_size=14, emb_size=512, num_classes=6):
         super().__init__()
-        self.patch_embed = PatchEmbedding(patch_size=patch_size, emb_size=emb_size)
-        self.word_embed = nn.Identity()
+        self.patch_embed = PatchEmbedding(img_size, patch_size, emb_size)
+        self.word_embed = WordEmbedding(emb_size)
         self.concat = FeatureFusion()
         self.scale_transform = ScaleTransformation(emb_size * 2, emb_size)
         self.channel_unification = ChannelUnification(emb_size)
         self.interaction_blocks = nn.Sequential(
-            *[InteractionBlock(emb_size, NUM_HEADS) for _ in range(NUM_LAYERS)]
+            InteractionBlock(emb_size, num_heads=8),
+            InteractionBlock(emb_size, num_heads=8),
+            InteractionBlock(emb_size, num_heads=8),
+            InteractionBlock(emb_size, num_heads=8)
         )
+        self.csa = CrossScaleAggregation()
         self.head = HamburgerHead(emb_size, emb_size)
-        self.classifier = MLPClassifier(in_dim=emb_size, num_classes=num_classes, hidden_dim=256)
+        self.classifier = MLPClassifier(emb_size, num_classes)
 
-    def forward(self, image):
-        B = image.size(0)
-        dummy_text = torch.randn(B, 1, HIDDEN_DIM).to(image.device)
-        image_feat = self.patch_embed(image)
-        x = self.concat(image_feat, dummy_text)
+    def forward(self, image, text):
+        image_feat = self.patch_embed(image)         # [B, N, E]
+        text_feat = self.word_embed(text)            # [B, N, E]
+        x = self.concat(image_feat, text_feat)       # Gabung visual & teks
         x = self.scale_transform(x)
         x = self.channel_unification(x)
         x = self.interaction_blocks(x)
+        x = self.csa(x)
         x = self.head(x)
-        x = x.mean(dim=1)
-        return self.classifier(x)
+        x = x.mean(dim=1)                            # Agregasi fitur patch
+        return self.classifier(x)                    # [B, num_classes]
 
 # --- 4. Load Model ---
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
