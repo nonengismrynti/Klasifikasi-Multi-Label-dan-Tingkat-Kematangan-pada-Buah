@@ -222,3 +222,4 @@ with torch.no_grad():
             st.write(f"📊 mean_prob: {mean_prob:.3f} | entropy: {entropy:.3f}")
             for label, prob in zip(LABELS, probs):
                 st.write(f"{label}: {prob:.2%}")
+
