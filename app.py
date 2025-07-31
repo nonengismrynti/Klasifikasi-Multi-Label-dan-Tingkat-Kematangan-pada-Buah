@@ -188,43 +188,37 @@ with torch.no_grad():
 
 
     with torch.no_grad():
-        outputs = model(input_tensor, dummy_text)  # ← perbaikan disini
+        outputs = model(input_tensor, dummy_text)
         probs = torch.sigmoid(outputs).cpu().numpy()[0].tolist()
 
-    # Ambil label di atas threshold
-    detected_labels = [(label, prob) for label, prob in zip(LABELS, probs) if prob >= THRESHOLD]
-    detected_labels.sort(key=lambda x: x[1], reverse=True)
+        # Ambil label di atas threshold
+        detected_labels = [(label, prob) for label, prob in zip(LABELS, probs) if prob >= THRESHOLD]
+        detected_labels.sort(key=lambda x: x[1], reverse=True)
 
-    # --- OOD DETECTION ---
-    max_prob = max(probs)
-    sorted_probs = sorted(probs, reverse=True)
-    second_max_prob = sorted_probs[1] if len(sorted_probs) > 1 else 0.0
-    mean_prob = sum(probs) / len(probs)
-    high_conf_labels = [(lbl, p) for lbl, p in zip(LABELS, probs) if p > 0.7]
+        # --- OOD DETECTION ---
+        max_prob = max(probs)
+        sorted_probs = sorted(probs, reverse=True)
+        second_max_prob = sorted_probs[1] if len(sorted_probs) > 1 else 0.0
+        mean_prob = sum(probs) / len(probs)
+        high_conf_labels = [(lbl, p) for lbl, p in zip(LABELS, probs) if p > 0.7]
 
+        entropy = -sum([p * math.log(p + 1e-8) for p in probs]) / len(probs)
+        high_conf_count = len([p for p in probs if p > 0.2])
+        is_ood = (high_conf_count < 2)
 
-    import math
-    entropy = -sum([p * math.log(p + 1e-8) for p in probs]) / len(probs)
+        st.subheader("🔍 Label Terdeteksi:")
 
-
-    high_conf_count = len([p for p in probs if p > 0.2])
-    is_ood = (high_conf_count < 2)
-
-
-
-    st.subheader("🔍 Label Terdeteksi:")
-
-    if is_ood:
-        st.warning("🚫 Gambar tidak mengandung buah yang dikenali.")
-    else:
-        if detected_labels:
-            for label, prob in detected_labels:
-                st.write(f"✅ *{label}* ({prob:.2%})")
+        if is_ood:
+            st.warning("🚫 Gambar tidak mengandung buah yang dikenali.")
         else:
-            st.warning("🚫 Tidak ada label yang melewati ambang batas.")
+            if detected_labels:
+                for label, prob in detected_labels:
+                    st.write(f"✅ *{label}* ({prob:.2%})")
+            else:
+                st.warning("🚫 Tidak ada label yang melewati ambang batas.")
 
-    # ✅ Debugging
-    with st.expander("📊 Lihat Semua Probabilitas"):
-        st.write(f"📊 mean_prob: {mean_prob:.3f} | entropy: {entropy:.3f}")
-        for label, prob in zip(LABELS, probs):
-            st.write(f"{label}: {prob:.2%}")
+        # ✅ Debugging
+        with st.expander("📊 Lihat Semua Probabilitas"):
+            st.write(f"📊 mean_prob: {mean_prob:.3f} | entropy: {entropy:.3f}")
+            for label, prob in zip(LABELS, probs):
+                st.write(f"{label}: {prob:.2%}")
