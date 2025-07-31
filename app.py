@@ -154,7 +154,9 @@ except Exception as e:
 # --- 5. Transformasi Gambar ---
 transform = transforms.Compose([
     transforms.Resize((IMAGE_SIZE, IMAGE_SIZE)),
-    transforms.ToTensor()
+    transforms.ToTensor(),
+    transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                         std=[0.229, 0.224, 0.225])
 ])
 
 # --- 6. Streamlit UI ---
@@ -169,8 +171,13 @@ if uploaded_file is not None:
 
     input_tensor = transform(image).unsqueeze(0).to(device)
 
-    # ✅ Tambahkan dummy text tensor agar sesuai input model
+    # 🧠 Gunakan dummy_text yang distribusinya random, bukan nol
     dummy_text = torch.randn((1, (IMAGE_SIZE // PATCH_SIZE) ** 2, HIDDEN_DIM)).to(device)
+
+with torch.no_grad():
+    logits = model(input_tensor, dummy_text)
+    probs = torch.sigmoid(logits).cpu().numpy()[0].tolist()
+
 
     with torch.no_grad():
         outputs = model(input_tensor, dummy_text)  # ← perbaikan disini
