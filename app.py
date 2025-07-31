@@ -170,7 +170,7 @@ if uploaded_file is not None:
     input_tensor = transform(image).unsqueeze(0).to(device)
 
     # ✅ Tambahkan dummy text tensor agar sesuai input model
-    dummy_text = torch.zeros((1, (IMAGE_SIZE // PATCH_SIZE) ** 2, HIDDEN_DIM)).to(device)
+    dummy_text = torch.randn((1, (IMAGE_SIZE // PATCH_SIZE) ** 2, HIDDEN_DIM)).to(device)
 
     with torch.no_grad():
         outputs = model(input_tensor, dummy_text)  # ← perbaikan disini
