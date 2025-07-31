@@ -139,17 +139,20 @@ device = 'cuda' if torch.cuda.is_available() else 'cpu'
 try:
     with safe_open(MODEL_PATH, framework="pt", device=device) as f:
         state_dict = {k: f.get_tensor(k) for k in f.keys()}
+
     model = HSVLTModel(
         patch_size=PATCH_SIZE,
         emb_size=HIDDEN_DIM,
         num_classes=len(LABELS)
     ).to(device)
-    # ✅ Pastikan strict=True karena shape sudah cocok
+
     model.load_state_dict(state_dict, strict=True)
     model.eval()
+
 except Exception as e:
     st.error(f"❌ Gagal memuat model: {e}")
     st.stop()
+
 
 # --- 5. Transformasi Gambar ---
 transform = transforms.Compose([
