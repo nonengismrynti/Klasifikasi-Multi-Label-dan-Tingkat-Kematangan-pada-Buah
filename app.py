@@ -168,7 +168,7 @@ transform = transforms.Compose([
 ])
 
 # --- 6. Streamlit UI ---
-st.title("🍉 Klasifikasi Multilabel Buah")
+st.title("🍉 Klasifikasi Multi-Label Buah")
 st.write("Upload gambar buah, sistem akan mendeteksi beberapa label sekaligus. Jika bukan buah, akan ditolak.")
 
 uploaded_file = st.file_uploader("Unggah gambar buah", type=['jpg', 'jpeg', 'png'])
