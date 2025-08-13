@@ -3,13 +3,11 @@ import torch
 import torch.nn as nn
 from safetensors.torch import safe_open
 import torchvision.transforms as transforms
-from torchvision.models import resnet50, ResNet50_Weights  # <— fruit gate
 from PIL import Image
 import gdown
 import os
 import math
-import traceback
-import numpy as np
+import traceback  # <-- tambah
 
 # --- 1. Setup ---
 MODEL_URL = 'https://drive.google.com/uc?id=1GPPxPSpodNGJHSeWyrTVwRoSjwW3HaA8'
@@ -27,14 +25,8 @@ NUM_LAYERS = 4
 HIDDEN_DIM = 640
 PATCH_SIZE = 14
 IMAGE_SIZE = 210
+# pakai threshold per-kelas (dari tuning test retrain-5)
 THRESHOLDS = [0.01, 0.01, 0.01, 0.06, 0.02, 0.01]
-
-# OOD / inference
-USE_MULTICROP   = True
-GRID_SIDE       = 2                # 2x2 + full image = 5 crops
-MIN_VOTES       = 2                # minimal crop yang setuju untuk mengaktifkan satu label
-ENABLE_FRUIT_GATE = True           # set False kalau mau memaksa tanpa gate
-FRUIT_SUM_MIN   = 0.15             # ambang probabilitas “buah” (ImageNet) agar dianggap gambar buah
 
 # --- 2. Download model ---
 def download_model():
@@ -48,49 +40,66 @@ if not os.path.exists(MODEL_PATH) or os.path.getsize(MODEL_PATH) < 50000:
     download_model()
 
 # --- 3. Komponen Model ---
+# 🔹 Patch Embedding
 class PatchEmbedding(nn.Module):
     def __init__(self, img_size, patch_size, emb_size):
         super().__init__()
         self.proj = nn.Conv2d(3, emb_size, kernel_size=patch_size, stride=patch_size)
     def forward(self, x):
-        x = self.proj(x)
-        x = x.flatten(2).transpose(1, 2)
+        x = self.proj(x)                          # [B, C, H/ps, W/ps]
+        x = x.flatten(2).transpose(1, 2)          # [B, num_patches, emb_size]
         return x
 
+# 🔹 Word Embedding (dummy: pass-through)
 class WordEmbedding(nn.Module):
-    def __init__(self, dim): super().__init__()
-    def forward(self, x): return x
+    def __init__(self, dim):
+        super().__init__()
+    def forward(self, x): 
+        return x                                   # x = dummy_text [B, 225, 640]
 
+# 🔹 Gabungan visual + teks
 class FeatureFusion(nn.Module):
-    def forward(self, v, t): return torch.cat([v, t[:, :v.size(1), :]], dim=-1)
+    def forward(self, v, t):                      # v = [B, N, E], t = [B, N, E]
+        return torch.cat([v, t[:, :v.size(1), :]], dim=-1)
 
+# 🔹 Scale Transformation
 class ScaleTransformation(nn.Module):
     def __init__(self, in_dim, out_dim):
         super().__init__()
         self.linear = nn.Linear(in_dim, out_dim)
-    def forward(self, x): return self.linear(x)
+    def forward(self, x): 
+        return self.linear(x)
 
+# 🔹 Channel Normalization
 class ChannelUnification(nn.Module):
     def __init__(self, dim):
         super().__init__()
         self.norm = nn.LayerNorm(dim)
-    def forward(self, x): return self.norm(x)
+    def forward(self, x): 
+        return self.norm(x)
 
+# 🔹 Attention Block (sesuai retrain-5: num_heads=10)
 class InteractionBlock(nn.Module):
     def __init__(self, dim, num_heads=NUM_HEADS):
         super().__init__()
         self.attn = nn.MultiheadAttention(dim, num_heads=num_heads, batch_first=True)
-    def forward(self, x): return self.attn(x, x, x)[0]
+    def forward(self, x): 
+        return self.attn(x, x, x)[0]
 
+# 🔹 CSA (agregasi skala sederhana)
 class CrossScaleAggregation(nn.Module):
-    def forward(self, x): return x.mean(dim=1, keepdim=True)
+    def forward(self, x): 
+        return x.mean(dim=1, keepdim=True)  # [B, 1, D]
 
+# 🔹 Linear Head
 class HamburgerHead(nn.Module):
     def __init__(self, in_dim, out_dim):
         super().__init__()
         self.linear = nn.Linear(in_dim, out_dim)
-    def forward(self, x): return self.linear(x)
+    def forward(self, x): 
+        return self.linear(x)
 
+# 🔹 Multi-Label Classifier
 class MLPClassifier(nn.Module):
     def __init__(self, in_dim, num_classes):
         super().__init__()
@@ -99,8 +108,10 @@ class MLPClassifier(nn.Module):
             nn.ReLU(),
             nn.Linear(256, num_classes)
         )
-    def forward(self, x): return self.mlp(x)
+    def forward(self, x): 
+        return self.mlp(x)
 
+# ==== MODEL ====
 class HSVLTModel(nn.Module):
     def __init__(self, img_size=210, patch_size=14, emb_size=HIDDEN_DIM,
                  num_classes=6, num_heads=NUM_HEADS, num_layers=NUM_LAYERS):
@@ -118,20 +129,21 @@ class HSVLTModel(nn.Module):
         self.classifier = MLPClassifier(emb_size, num_classes)
 
     def forward(self, image, text):
-        image_feat = self.patch_embed(image)
-        text_feat  = self.word_embed(text)
+        image_feat = self.patch_embed(image)         # [B, N, E]
+        text_feat  = self.word_embed(text)           # [B, N, E]
         x = self.concat(image_feat, text_feat)
         x = self.scale_transform(x)
         x = self.channel_unification(x)
         x = self.interaction_blocks(x)
         x = self.csa(x)
         x = self.head(x)
-        x = x.mean(dim=1)
-        return self.classifier(x)
+        x = x.mean(dim=1)                            # [B, E]
+        return self.classifier(x)                    # [B, num_classes]
 
 # --- 4. Load Model ---
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
+# Safety: cek konsistensi panjang THRESHOLDS
 if len(THRESHOLDS) != len(LABELS):
     st.error("Panjang THRESHOLDS tidak sama dengan jumlah LABELS.")
     st.stop()
@@ -164,98 +176,57 @@ transform = transforms.Compose([
                          std=[0.229, 0.224, 0.225])
 ])
 
-# --- 5.1 Fruit gate (ImageNet) ---
-FRUIT_GATE_OK = False
-if ENABLE_FRUIT_GATE:
-    try:
-        _weights = ResNet50_Weights.IMAGENET1K_V2
-        fruit_gate = resnet50(weights=_weights).to(device).eval()
-        imagenet_tf = _weights.transforms()
-        imagenet_labels = _weights.meta["categories"]
-        FRUIT_KEYWORDS = [
-            "avocado","mango","banana","orange","lemon","lime","pineapple","pomegranate",
-            "apple","pear","peach","apricot","plum","grape","strawberry","raspberry",
-            "blueberry","blackberry","passion","papaya","guava","fig","date","kiwi",
-            "cucumber","zucchini","plantain","melon","cantaloupe","honeydew","durian",
-            "jackfruit","lychee","longan","tamarind","starfruit","carambola"
-        ]
-        FRUIT_IDX = [i for i,n in enumerate(imagenet_labels) if any(k in n.lower() for k in FRUIT_KEYWORDS)]
-        FRUIT_GATE_OK = len(FRUIT_IDX) > 0
-    except Exception as _:
-        FRUIT_GATE_OK = False
-
-def fruit_probability(pil_img):
-    """Kembalikan (prob_sum_fruits, top1_prob, top1_label) dari ResNet50 ImageNet."""
-    if not FRUIT_GATE_OK:
-        return None
-    x = imagenet_tf(pil_img).unsqueeze(0).to(device)
-    with torch.no_grad():
-        logits = fruit_gate(x)
-        probs  = torch.softmax(logits, dim=1)[0]
-    prob_sum = float(probs[FRUIT_IDX].sum().item())
-    top1_prob, top1_idx = probs.max(dim=0)
-    return prob_sum, float(top1_prob.item()), imagenet_labels[int(top1_idx)]
-
-# --- 5.2 Multi-crop inference ---
-def infer_multicrop_probs(image_pil, n_side=2):
-    W, H = image_pil.size
-    crops = [image_pil.crop((int(W*j/n_side), int(H*i/n_side),
-                             int(W*(j+1)/n_side), int(H*(i+1)/n_side)))
-             for i in range(n_side) for j in range(n_side)]
-    crops.append(image_pil)  # full image
-
-    num_tokens = (IMAGE_SIZE // PATCH_SIZE) ** 2
-    probs_list = []
-    with torch.no_grad():
-        for crop in crops:
-            x = transform(crop).unsqueeze(0).to(device)
-            dummy_text = torch.zeros((1, num_tokens, HIDDEN_DIM), device=device)
-            p = torch.sigmoid(model(x, dummy_text)).cpu().numpy()[0]
-            probs_list.append(p)
-    return np.stack(probs_list, axis=0)  # [num_crops, num_classes]
-
 # --- 6. Streamlit UI ---
 st.title("🍉 Klasifikasi Multi-Label Buah")
-st.write("Upload gambar buah; sistem akan menolak objek non-buah.")
+st.write("Upload gambar buah, sistem akan mendeteksi beberapa label sekaligus. Jika bukan buah, akan ditolak.")
 
-uploaded_file = st.file_uploader("Unggah gambar", type=['jpg', 'jpeg', 'png'])
+uploaded_file = st.file_uploader("Unggah gambar buah", type=['jpg', 'jpeg', 'png'])
 
 if uploaded_file is not None:
     image = Image.open(uploaded_file).convert('RGB')
     st.image(image, caption="Gambar Input", use_container_width=True)
 
-    # 6.1 Fruit gate (tolak non-buah sedini mungkin)
-    gate_info = fruit_probability(image) if ENABLE_FRUIT_GATE else None
-    if gate_info is not None:
-        fruit_sum, top1_p, top1_label = gate_info
-        if fruit_sum < FRUIT_SUM_MIN:
-            st.warning(f"🚫 Ini **bukan buah**.")
-            st.stop()
+    input_tensor = transform(image).unsqueeze(0).to(device)
 
-    # 6.2 Inference (multi-crop + votes)
-    probs_crops = infer_multicrop_probs(image, n_side=GRID_SIDE) if USE_MULTICROP \
-                  else infer_multicrop_probs(image, n_side=1)
-    probs_max   = probs_crops.max(axis=0)                     # agregasi nilai
-    votes       = (probs_crops >= np.array(THRESHOLDS)).sum(axis=0)  # dukungan per kelas
+    # === penting: zeros (bukan randn) agar konsisten dgn training retrain-5
+    num_tokens = (IMAGE_SIZE // PATCH_SIZE) ** 2  # 225
+    dummy_text = torch.zeros((1, num_tokens, HIDDEN_DIM), device=device)
 
-    # aktifkan label hanya jika melewati threshold & punya votes cukup
-    detected = [(lbl, float(p), int(v)) 
-                for lbl, p, thr, v in zip(LABELS, probs_max, THRESHOLDS, votes)
-                if (p >= thr and v >= MIN_VOTES)]
-    detected.sort(key=lambda x: x[1], reverse=True)
+    with torch.no_grad():
+        outputs = model(input_tensor, dummy_text)
+        probs = torch.sigmoid(outputs).cpu().numpy()[0].tolist()
 
-    # statistik
-    mean_prob = float(probs_max.mean())
-    entropy = -float(np.mean([p * math.log(p + 1e-8) for p in probs_max]))
+    # --- pakai threshold per-kelas ---
+    detected_labels = [
+        (label, prob) for label, prob, thr in zip(LABELS, probs, THRESHOLDS) if prob >= thr
+    ]
+    detected_labels.sort(key=lambda x: x[1], reverse=True)
+
+    # Statistik tambahan
+    max_prob = max(probs)
+    sorted_probs = sorted(probs, reverse=True)
+    second_max_prob = sorted_probs[1] if len(sorted_probs) > 1 else 0.0
+    mean_prob = sum(probs) / len(probs)
+
+    # OOD sederhana: hitung berapa label yang melewati threshold per-kelas
+    high_conf_count = sum(int(p >= t) for p, t in zip(probs, THRESHOLDS))
+    is_ood = (high_conf_count < 1)
 
     st.subheader("🔍 Label Terdeteksi:")
-    if not detected:
-        st.warning("Tidak ada label yang memenuhi kriteria (threshold + votes).")
-    else:
-        for label, prob, v in detected:
-            st.write(f"✅ *{label}* ({prob:.2%}) — votes: {v}")
 
-    with st.expander("📊 Probabilitas & Votes per Kelas"):
-        st.write(f"📊 mean_prob: {mean_prob:.3f} | entropy: {entropy:.3f} | crops: {probs_crops.shape[0]}")
-        for i, lbl in enumerate(LABELS):
-            st.write(f"{lbl}: max={probs_max[i]:.2%} | thr={THRESHOLDS[i]:.2f} | votes={votes[i]}")
+    if is_ood:
+        st.warning("🚫 Gambar tidak mengandung buah yang dikenali.")
+    else:
+        if detected_labels:
+            for label, prob in detected_labels:
+                st.write(f"✅ *{label}* ({prob:.2%})")
+        else:
+            st.warning("🚫 Tidak ada label yang melewati ambang batas.")
+
+    with st.expander("📊 Lihat Semua Probabilitas"):
+        # Entropy rata-rata (info saja)
+        entropy = -sum([p * math.log(p + 1e-8) for p in probs]) / len(probs)
+        st.write(f"📊 mean_prob: {mean_prob:.3f} | entropy: {entropy:.3f}")
+        for label, prob, thr in zip(LABELS, probs, THRESHOLDS):
+            pass_thr = "✓" if prob >= thr else "✗"
+            st.write(f"{label}: {prob:.2%} (thr {thr:.2f}) {pass_thr}")
