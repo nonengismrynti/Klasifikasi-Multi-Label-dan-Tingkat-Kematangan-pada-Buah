@@ -144,8 +144,8 @@ def sliding_window_crops(image_pil, win_frac=WIN_FRAC, stride_frac=STRIDE_FRAC, 
 # --------------------------------------------------------------------------------------
 
 # --- 6. UI ---
-st.title("🍉 Klasifikasi Multi-Label Buah (pakai Sliding Window crop)")
-st.write("Fungsi sliding_window: memotong gambar jadi beberapa crop saat prediksi, lalu kita gabungkan hasilnya.")
+st.title("🍉 Klasifikasi Multi-Label Buah)")
+st.write("Unggah gambar yang akan di klasifikasikan.")
 
 uploaded_file = st.file_uploader("Unggah gambar buah", type=['jpg','jpeg','png'])
 
