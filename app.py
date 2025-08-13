@@ -229,7 +229,7 @@ if uploaded_file is not None:
     if gate_info is not None:
         fruit_sum, top1_p, top1_label = gate_info
         if fruit_sum < FRUIT_SUM_MIN:
-            st.warning(f"🚫 Ini **bukan buah** (gate prob buah={fruit_sum:.2f}, top-1={top1_label} {top1_p:.2f}).")
+            st.warning(f"🚫 Ini **bukan buah**.")
             st.stop()
 
     # 6.2 Inference (multi-crop + votes)
