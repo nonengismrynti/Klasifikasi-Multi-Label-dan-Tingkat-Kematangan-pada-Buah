@@ -225,41 +225,39 @@ if uploaded_file is not None:                                       # Jika ada f
     votes = (probs_crops >= np.array(THRESHOLDS)).sum(axis=0).astype(int)  # [C]
 
     # (3) Ambil kandidat: skor ≥ threshold dan votes ≥ MIN_VOTES
-    candidates = {
-        lbl: (float(p), int(v))                                     # simpan (prob, votes)
+    #     (TANPA aturan eksklusif matang vs mentah)
+    detections = [
+        (lbl, float(p), int(v))                     # tuple (nama_label, prob, votes)
         for lbl, p, thr, v in zip(LABELS, probs, THRESHOLDS, votes.tolist())
-        if (p >= thr and v >= MIN_VOTES)
-    }
-
-    # (4) Aturan eksklusif matang vs mentah (per buah pilih satu label terbaik)
-    pairs = [
-        ('alpukat_matang', 'alpukat_mentah'),
-        ('belimbing_matang', 'belimbing_mentah'),
-        ('mangga_matang', 'mangga_mentah')
+        if (p >= thr and v >= MIN_VOTES)            # syarat lulus
     ]
-    final_labels = []                                               # Hasil akhir yang ditampilkan
-    for a, b in pairs:
-        has_a, has_b = a in candidates, b in candidates
-        if has_a and has_b:                                         # Jika dua-duanya lolos
-            chosen = a if candidates[a][0] >= candidates[b][0] else b
-            final_labels.append((chosen, *candidates[chosen]))      # (label, prob, votes)
-        elif has_a:
-            final_labels.append((a, *candidates[a]))
-        elif has_b:
-            final_labels.append((b, *candidates[b]))
 
-    final_labels.sort(key=lambda x: x[1], reverse=True)             # Urutkan dari skor tertinggi
+    # Urutkan dari probabilitas tertinggi ke terendah
+    detections.sort(key=lambda x: x[1], reverse=True)
 
-    # (5) Tampilkan hasil — votes disembunyikan jika SHOW_VOTES=False
+    # (4) Tampilkan hasil — votes disembunyikan jika SHOW_VOTES=False
     st.subheader("🔍 Label Terdeteksi:")
-    if not final_labels:
+    if not detections:
         st.warning("🚫 Tidak ada label yang memenuhi kriteria (threshold + votes).")
     else:
-        for label, prob, v in final_labels:
+        st.write(f"Total label terdeteksi: **{len(detections)}**")
+        for label, prob, v in detections:
             if SHOW_VOTES:
-                st.write(f"✅ *{label}* ({prob:.2%}) — votes: {v}")  # Tampilkan votes (opsional)
+                st.write(f"✅ *{label}* ({prob:.2%}) — votes: {v}")
             else:
-                st.write(f"✅ *{label}* ({prob:.2%})")               # Tanpa votes
+                st.write(f"✅ *{label}* ({prob:.2%})")
+
+    # (5) Panel detail (opsional: votes hanya jika SHOW_VOTES=True)
+    with st.expander("📊 Lihat Semua Probabilitas"):
+        mean_prob = float(np.mean(probs))
+        entropy   = -float(np.mean([p * math.log(p + 1e-8) for p in probs]))
+        st.write(f"🪟 crops: {probs_crops.shape[0]} | mean_prob: {mean_prob:.3f} | entropy: {entropy:.3f}")
+        for i, lbl in enumerate(LABELS):
+            pass_thr = "✓" if probs[i] >= THRESHOLDS[i] else "✗"
+            line = f"{lbl}: {probs[i]:.2%} (thr {THRESHOLDS[i]:.2f}) {pass_thr}"
+            if SHOW_VOTES:
+                line += f" | votes={int(votes[i])}"
+            st.write(line)
 
     # (6) Panel detail (opsional tampilkan votes sesuai flag)
     with st.expander("📊 Lihat Semua Probabilitas"):
