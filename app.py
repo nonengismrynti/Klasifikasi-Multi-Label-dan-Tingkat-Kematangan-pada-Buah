@@ -165,7 +165,7 @@ transform = transforms.Compose([
 def sliding_window_infer(image_pil, model, transform, device,
                          hidden_dim, patch_size,
                          win_fracs=WIN_FRACS, stride_frac=STRIDE_FRAC,
-                         include_full=False):
+                         include_full=True):                         # ← ikut nilai full image juga
     """
     Potong gambar menjadi beberapa crop overlap (multi-skala),
     prediksi per-crop, lalu agregasi probabilitas per kelas
@@ -217,7 +217,7 @@ if uploaded_file is not None:                                       # Jika ada f
     probs_max, probs_crops = sliding_window_infer(
         image_pil=image, model=model, transform=transform, device=device,
         hidden_dim=HIDDEN_DIM, patch_size=PATCH_SIZE,
-        win_fracs=WIN_FRACS, stride_frac=STRIDE_FRAC, include_full=False
+        win_fracs=WIN_FRACS, stride_frac=STRIDE_FRAC, include_full=True  # ← ikut full image
     )
     probs = probs_max.tolist()                                      # Ke list Python
 
@@ -231,24 +231,9 @@ if uploaded_file is not None:                                       # Jika ada f
         if (p >= thr and v >= MIN_VOTES)
     }
 
-    # (4) Aturan eksklusif matang vs mentah (per buah pilih satu label terbaik)
-    pairs = [
-        ('alpukat_matang', 'alpukat_mentah'),
-        ('belimbing_matang', 'belimbing_mentah'),
-        ('mangga_matang', 'mangga_mentah')
-    ]
-    final_labels = []                                               # Hasil akhir yang ditampilkan
-    for a, b in pairs:
-        has_a, has_b = a in candidates, b in candidates
-        if has_a and has_b:                                         # Jika dua-duanya lolos
-            chosen = a if candidates[a][0] >= candidates[b][0] else b
-            final_labels.append((chosen, *candidates[chosen]))      # (label, prob, votes)
-        elif has_a:
-            final_labels.append((a, *candidates[a]))
-        elif has_b:
-            final_labels.append((b, *candidates[b]))
-
-    final_labels.sort(key=lambda x: x[1], reverse=True)             # Urutkan dari skor tertinggi
+    # (4) **Tanpa aturan eksklusif**: ambil SEMUA label yang lolos (bisa >3 label)
+    final_labels = [(lbl, p, v) for lbl, (p, v) in candidates.items()]  # List (label, prob, votes)
+    final_labels.sort(key=lambda x: x[1], reverse=True)                 # Urutkan dari skor tertinggi
 
     # (5) Tampilkan hasil 
     st.subheader("🔍 Label Terdeteksi:")
