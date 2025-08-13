@@ -250,7 +250,7 @@ if uploaded_file is not None:                                       # Jika ada f
 
     final_labels.sort(key=lambda x: x[1], reverse=True)             # Urutkan dari skor tertinggi
 
-    # (5) Tampilkan hasil — votes disembunyikan jika SHOW_VOTES=False
+    # (5) Tampilkan hasil 
     st.subheader("🔍 Label Terdeteksi:")
     if not final_labels:
         st.warning("🚫 Tidak ada label yang memenuhi kriteria (threshold + votes).")
