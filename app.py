@@ -6,12 +6,12 @@ import torchvision.transforms as transforms # Transformasi gambar
 from PIL import Image                       # Baca gambar
 import gdown                                # Download dari Google Drive
 import os                                   # Utilitas file/path
-import math                                 # Untuk hitung entropi (informasi)
+import math                                 # Info metrik tambahan
 import traceback                            # Tampilkan traceback saat error
-import numpy as np                          # Agregasi antar-crop (sliding window)
+import numpy as np                          # Numpy untuk array & IoU
 
 # ========================
-# 1) Setup umum & opsi UI
+# 1) Setup umum & label
 # ========================
 MODEL_URL  = 'https://drive.google.com/uc?id=1GPPxPSpodNGJHSeWyrTVwRoSjwW3HaA8'  # Link model di Drive
 MODEL_PATH = 'model_3.safetensors'                                               # Nama file lokal model
@@ -22,8 +22,6 @@ LABELS = [                                   # Urutan label HARUS sama seperti s
     'mangga_matang', 'mangga_mentah'
 ]
 
-SHOW_VOTES = False                           # ← Tampilkan "votes" di UI? (False = disembunyikan)
-
 # ======================================================
 # 2) Parameter model + inferensi (mengikuti retrain-5)
 # ======================================================
@@ -32,15 +30,19 @@ NUM_LAYERS  = 4                              # Banyak InteractionBlock
 HIDDEN_DIM  = 640                            # Dimensi embedding
 PATCH_SIZE  = 14                             # Ukuran patch conv
 IMAGE_SIZE  = 210                            # Ukuran input ke model
-THRESHOLDS  = [0.01, 0.01, 0.01, 0.06, 0.02, 0.01]  # Threshold per-kelas (hasil tuning validasi)
+THRESHOLDS  = [0.01, 0.01, 0.01, 0.06, 0.02, 0.01]  # Ambang per kelas (dari validasi)
 
-# Sliding-window (dipasang di tahap prediksi/aplikasi sesuai arahan dosen)
-WIN_FRACS   = (1.0, 0.7, 0.5, 0.4)           # Skala jendela relatif terhadap sisi terpendek
-STRIDE_FRAC = 0.33                           # Overlap ~67% (stride = 0.33 * window)
-MIN_VOTES   = 2                              # Minimal jumlah crop yang “setuju” agar label dihitung
+# ==========
+# Sliding window + clustering
+# ==========
+WIN_FRACS    = (0.55, 0.7, 0.85, 1.0)        # Ukuran jendela relatif sisi terpendek (beberapa skala)
+STRIDE_FRAC  = 0.28                          # Overlap besar (stride = 0.28 * window)
+IOU_THR      = 0.35                          # IoU untuk mengelompokkan crop ke objek yang sama
+MIN_VOTES    = 2                             # Minimal crop pendukung dalam 1 klaster
+MIN_SCORE    = 0.10                          # Minimal skor rata-rata klaster agar valid (filter noise)
 
 # ==========================================
-# 3) Download model bila belum ada/terdeteksi korup
+# 3) Download model bila belum ada / korup
 # ==========================================
 def download_model():                        # Fungsi unduh model dari Google Drive
     with st.spinner('🔄 Mengunduh ulang model dari Google Drive...'):
@@ -159,101 +161,136 @@ transform = transforms.Compose([
                          std =[0.229, 0.224, 0.225])
 ])
 
-# ==========================================================
-# 7) Sliding-window inference + agregasi (MAX antar-crop)
-# ==========================================================
-def sliding_window_infer(image_pil, model, transform, device,
-                         hidden_dim, patch_size,
-                         win_fracs=WIN_FRACS, stride_frac=STRIDE_FRAC,
-                         include_full=True):                         # ← ikut nilai full image juga
+# =========================================
+# 7) Utilitas IoU & sliding window + infer
+# =========================================
+def iou(box1, box2):                            # Hitung Intersection-over-Union dua kotak
+    x1, y1, x2, y2 = box1
+    a1, b1, a2, b2 = box2
+    inter_x1, inter_y1 = max(x1, a1), max(y1, b1)
+    inter_x2, inter_y2 = min(x2, a2), min(y2, b2)
+    iw, ih = max(0, inter_x2 - inter_x1), max(0, inter_y2 - inter_y1)
+    inter = iw * ih
+    area1 = (x2 - x1) * (y2 - y1)
+    area2 = (a2 - a1) * (b2 - b1)
+    union = area1 + area2 - inter + 1e-8
+    return inter / union
+
+def sliding_window_infer(image_pil):            # Potong gambar → prediksi tiap crop → simpan box & skor
+    W, H = image_pil.size                       # Lebar & tinggi gambar asli
+    short = min(W, H)                           # Sisi terpendek (acuan ukuran window)
+    boxes, probs = [], []                       # Simpan bbox & probabilitas per-crop
+    num_tokens = (IMAGE_SIZE // PATCH_SIZE) ** 2# Jumlah token dummy text
+
+    with torch.no_grad():                       # Non-grad untuk inferensi
+        for wf in WIN_FRACS:                    # Loop beberapa skala jendela
+            win  = max(int(short * wf), 64)     # Ukuran jendela (px)
+            step = max(1, int(win * STRIDE_FRAC))# Langkah geser (overlap)
+            for top in range(0, max(H - win + 1, 1), step):          # Geser vertikal
+                for left in range(0, max(W - win + 1, 1), step):     # Geser horizontal
+                    box = (left, top, left + win, top + win)         # x1,y1,x2,y2
+                    crop = image_pil.crop(box)                       # Ambil crop persegi
+                    x = transform(crop).unsqueeze(0).to(device)      # Transform → Tensor [1,3,210,210]
+                    dummy_text = torch.zeros((1, num_tokens, HIDDEN_DIM), device=device)  # Dummy text zeros
+                    logits = model(x, dummy_text)                    # Forward → logits [1,C]
+                    p = torch.sigmoid(logits).cpu().numpy()[0]       # Sigmoid → probabilitas [C]
+                    boxes.append(box)                                # Simpan bbox
+                    probs.append(p)                                  # Simpan probabilitas
+
+    return np.array(boxes, dtype=np.int32), np.array(probs, dtype=np.float32)  # Kembalikan semua crop
+
+# ============================================================
+# 8) Klasterisasi crop → 1 label per objek (winner in cluster)
+# ============================================================
+def cluster_and_label(boxes, probs):
     """
-    Potong gambar menjadi beberapa crop overlap (multi-skala),
-    prediksi per-crop, lalu agregasi probabilitas per kelas
-    dengan operasi MAX antar-crop.
+    - Ambil prediksi terbaik tiap crop (kelas & skor tertinggi).
+    - Buang crop dgn skor < threshold kelasnya (reduksi noise).
+    - Klasterkan crop berdasarkan IoU>IOU_THR (objek yang sama).
+    - Untuk tiap klaster: rata-ratakan skor per-kelas, ambil kelas
+      dgn skor rata-rata tertinggi → itulah label objek itu.
+    - Hasil: list label (satu per buah/objek).
     """
-    W, H = image_pil.size                                          # Lebar & tinggi asli
-    short = min(W, H)                                              # Sisi terpendek (basis window)
-    crops = []                                                     # Kumpulan crop
+    if len(boxes) == 0:                         # Jika tidak ada crop, kembalikan kosong
+        return []
 
-    for wf in win_fracs:                                           # Loop tiap skala window
-        win  = max(int(short * wf), 64)                            # Ukuran window (min 64 px)
-        step = max(1, int(win * stride_frac))                      # Stride (overlap tinggi → step kecil)
-        for top in range(0, max(H - win + 1, 1), step):            # Iterasi vertikal
-            for left in range(0, max(W - win + 1, 1), step):       # Iterasi horizontal
-                crops.append(image_pil.crop((left, top, left + win, top + win)))  # Ambil crop persegi
+    # Tentukan kelas terbaik per crop
+    top_ids   = probs.argmax(axis=1)            # Index kelas dengan skor tertinggi per crop
+    top_scores= probs.max(axis=1)               # Skor tertinggi per crop
+    # Ambang dinamis: pakai threshold spesifik kelas
+    keep_mask = np.array([top_scores[i] >= THRESHOLDS[top_ids[i]] for i in range(len(top_ids))], dtype=bool)
+    boxes  = boxes[keep_mask]                   # Saring bbox yang cukup yakin
+    probs  = probs[keep_mask]                   # Saring probabilitasnya juga
+    if len(boxes) == 0:                         # Jika semua terbuang, kembalikan kosong
+        return []
 
-    if include_full:                                               # Opsional: tambahkan full image
-        crops.append(image_pil)
+    # Urutkan crop berdasarkan skor terbaik (desc) agar klaster stabil
+    order = np.argsort(-probs.max(axis=1))
+    boxes, probs = boxes[order], probs[order]
 
-    num_tokens = (IMAGE_SIZE // patch_size) ** 2                   # 225 token (15x15)
-    probs_list = []                                                # Daftar probabilitas per-crop
-    model.eval()                                                   # Pastikan eval
-    with torch.no_grad():                                          # Non-grad untuk inferensi
-        for crop in crops:
-            x = transform(crop).unsqueeze(0).to(device)            # Transform + batch=1
-            dummy_text = torch.zeros((1, num_tokens, hidden_dim),  # Dummy text zeros (konsisten training)
-                                      device=device)
-            logits = model(x, dummy_text)                          # Forward → logits [1, C]
-            p = torch.sigmoid(logits).cpu().numpy()[0]             # Sigmoid → probabilitas [C]
-            probs_list.append(p)                                   # Simpan hasil
+    clusters = []                               # List klaster (tiap klaster = list index crop)
+    assigned = np.zeros(len(boxes), dtype=bool) # Penanda crop sudah masuk klaster
 
-    probs_crops = np.stack(probs_list, axis=0)                     # [N, C] semua crop
-    probs_max   = probs_crops.max(axis=0)                          # Agregasi MAX antar-crop → [C]
-    return probs_max, probs_crops                                   # Kembalikan vektor & matriks
+    for i in range(len(boxes)):                 # Greedy clustering
+        if assigned[i]:                         # Skip jika sudah dikelompokkan
+            continue
+        # Buat klaster baru dengan anchor i
+        cluster_idx = [i]
+        assigned[i] = True
+        for j in range(i+1, len(boxes)):        # Cari crop lain yang overlap tinggi
+            if assigned[j]: 
+                continue
+            if iou(boxes[i], boxes[j]) >= IOU_THR:  # Jika IoU cukup besar → dianggap objek yg sama
+                cluster_idx.append(j)
+                assigned[j] = True
+        clusters.append(cluster_idx)            # Simpan klaster
+
+    results = []                                # Hasil akhir (label, skor, jumlah-vote)
+    for idxs in clusters:                       # Untuk tiap klaster
+        kl_probs = probs[idxs]                  # Ambil semua prob di klaster [n, C]
+        votes = len(idxs)                       # Banyak crop pendukung
+        mean_scores = kl_probs.mean(axis=0)     # Rata-rata skor per-kelas di klaster [C]
+        best_id = int(mean_scores.argmax())     # Pilih kelas dengan skor rata-rata tertinggi
+        best_score = float(mean_scores[best_id])# Skor rata-rata kelas terpilih
+        # Filter akhir: butuh vote cukup & skor rata-rata di atas threshold & MIN_SCORE umum
+        if votes >= MIN_VOTES and best_score >= max(THRESHOLDS[best_id], MIN_SCORE):
+            results.append((LABELS[best_id], best_score, votes))  # Simpan sebagai 1 objek terdeteksi
+
+    # Urutkan dari skor tertinggi supaya rapi
+    results.sort(key=lambda x: x[1], reverse=True)
+    return results
 
 # ==========
-# 8) UI App
+# 9) UI App
 # ==========
-st.title("🍉 Klasifikasi Multi-Label Buah")                         # Judul
-st.write("Upload gambar buah; sistem akan mendeteksi beberapa label sekaligus.")  # Deskripsi
+st.title("🍉 Klasifikasi Multi-Label Buah (Sliding Window + Clustering)")
+st.write("Target: jumlah label ≈ jumlah buah. 1 buah → 1 label; 3 buah → 3 label; 6 buah → 6 label.")
 
-uploaded_file = st.file_uploader("Unggah gambar buah", type=['jpg', 'jpeg', 'png'])  # Uploader
+uploaded_file = st.file_uploader("Unggah gambar buah", type=['jpg', 'jpeg', 'png'])
 
-if uploaded_file is not None:                                       # Jika ada file diunggah
+if uploaded_file is not None:
     image = Image.open(uploaded_file).convert('RGB')                # Baca sebagai RGB
     st.image(image, caption="Gambar Input", use_container_width=True)  # Tampilkan
 
-    # (1) Prediksi dengan Sliding-Window
-    probs_max, probs_crops = sliding_window_infer(
-        image_pil=image, model=model, transform=transform, device=device,
-        hidden_dim=HIDDEN_DIM, patch_size=PATCH_SIZE,
-        win_fracs=WIN_FRACS, stride_frac=STRIDE_FRAC, include_full=True  # ← ikut full image
-    )
-    probs = probs_max.tolist()                                      # Ke list Python
+    # (1) Prediksi semua crop (sliding window)
+    boxes, probs = sliding_window_infer(image)                      # Dapatkan semua bbox & prob per-crop
 
-    # (2) Hitung votes: jumlah crop yang melewati threshold per-kelas
-    votes = (probs_crops >= np.array(THRESHOLDS)).sum(axis=0).astype(int)  # [C]
+    # (2) Klasterkan crop → satu label per objek (buah)
+    detections = cluster_and_label(boxes, probs)                    # Hasil: [(label, score, votes), ...]
 
-    # (3) Ambil kandidat: skor ≥ threshold dan votes ≥ MIN_VOTES
-    candidates = {
-        lbl: (float(p), int(v))                                     # simpan (prob, votes)
-        for lbl, p, thr, v in zip(LABELS, probs, THRESHOLDS, votes.tolist())
-        if (p >= thr and v >= MIN_VOTES)
-    }
-
-    # (4) **Tanpa aturan eksklusif**: ambil SEMUA label yang lolos (bisa >3 label)
-    final_labels = [(lbl, p, v) for lbl, (p, v) in candidates.items()]  # List (label, prob, votes)
-    final_labels.sort(key=lambda x: x[1], reverse=True)                 # Urutkan dari skor tertinggi
-
-    # (5) Tampilkan hasil 
+    # (3) Tampilkan hasil
     st.subheader("🔍 Label Terdeteksi:")
-    if not final_labels:
-        st.warning("🚫 Tidak ada label yang memenuhi kriteria (threshold + votes).")
+    if not detections:
+        st.warning("🚫 Tidak ada objek buah yang lolos kriteria.")
     else:
-        for label, prob, v in final_labels:
-            if SHOW_VOTES:
-                st.write(f"✅ *{label}* ({prob:.2%}) — votes: {v}")  # Tampilkan votes (opsional)
-            else:
-                st.write(f"✅ *{label}* ({prob:.2%})")               # Tanpa votes
+        for label, score, votes in detections:
+            st.write(f"✅ *{label}* — {score:.2%} (votes: {votes})")
 
-    # (6) Panel detail (opsional tampilkan votes sesuai flag)
-    with st.expander("📊 Lihat Semua Probabilitas"):
-        mean_prob = float(np.mean(probs))                            # Rata-rata probabilitas
-        entropy   = -float(np.mean([p * math.log(p + 1e-8) for p in probs]))  # Entropi sederhana
-        st.write(f"🪟 crops: {probs_crops.shape[0]} | mean_prob: {mean_prob:.3f} | entropy: {entropy:.3f}")
-        for i, lbl in enumerate(LABELS):
-            pass_thr = "✓" if probs[i] >= THRESHOLDS[i] else "✗"    # Lolos threshold?
-            line = f"{lbl}: {probs[i]:.2%} (thr {THRESHOLDS[i]:.2f}) {pass_thr}"
-            if SHOW_VOTES:
-                line += f" | votes={int(votes[i])}"                  # Tambah votes jika ingin
-            st.write(line)
+    # (4) Panel detail (opsional, metrik ringkas)
+    with st.expander("📊 Ringkasan Proses"):
+        total_crops = len(boxes)
+        st.write(f"🪟 total crop: {total_crops} | klaster terpilih: {len(detections)}")
+        # Rata-rata maksimum skor per-crop (indikasi “keyakinan” agregat, tidak memengaruhi hasil)
+        if total_crops > 0:
+            max_per_crop = probs.max(axis=1)
+            st.write(f"📈 rata-rata skor max per-crop: {float(max_per_crop.mean()):.3f}")
