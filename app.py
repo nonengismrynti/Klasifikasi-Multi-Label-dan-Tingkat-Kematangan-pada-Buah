@@ -7,10 +7,11 @@ from PIL import Image
 import gdown
 import os
 import math
+import traceback  # <-- tambah
 
 # --- 1. Setup ---
-MODEL_URL = 'https://drive.google.com/uc?id=1PbHLaNkAToSVsVnkGo2N8DhAXyOqvd7F'
-MODEL_PATH = 'model_2.safetensors'
+MODEL_URL = 'https://drive.google.com/uc?id=1GPPxPSpodNGJHSeWyrTVwRoSjwW3HaA8'
+MODEL_PATH = 'model_3.safetensors'
 
 LABELS = [
     'alpukat_matang', 'alpukat_mentah',
@@ -18,13 +19,14 @@ LABELS = [
     'mangga_matang', 'mangga_mentah'
 ]
 
-# ✅ Gunakan parameter eksperimen 7
-HIDDEN_DIM   = 512
-PATCH_SIZE   = 14
-IMAGE_SIZE   = 210
-NUM_HEADS    = 8   
-NUM_LAYERS   = 4
-THRESHOLD    = 0.30
+# ==== PARAM ====
+NUM_HEADS  = 10
+NUM_LAYERS = 4
+HIDDEN_DIM = 640
+PATCH_SIZE = 14
+IMAGE_SIZE = 210
+# pakai threshold per-kelas (dari tuning test retrain-5)
+THRESHOLDS = [0.01, 0.01, 0.01, 0.06, 0.02, 0.01]
 
 # --- 2. Download model ---
 def download_model():
@@ -38,59 +40,64 @@ if not os.path.exists(MODEL_PATH) or os.path.getsize(MODEL_PATH) < 50000:
     download_model()
 
 # --- 3. Komponen Model ---
-# 🔹 Komponen Patch Embedding
+# 🔹 Patch Embedding
 class PatchEmbedding(nn.Module):
     def __init__(self, img_size, patch_size, emb_size):
         super().__init__()
         self.proj = nn.Conv2d(3, emb_size, kernel_size=patch_size, stride=patch_size)
-
     def forward(self, x):
         x = self.proj(x)                          # [B, C, H/ps, W/ps]
         x = x.flatten(2).transpose(1, 2)          # [B, num_patches, emb_size]
         return x
 
-# 🔹 Komponen Word Embedding (sederhana → input dummy)
+# 🔹 Word Embedding (dummy: pass-through)
 class WordEmbedding(nn.Module):
     def __init__(self, dim):
         super().__init__()
-    def forward(self, x): return x               # x = dummy_text [B, 225, 640]
+    def forward(self, x): 
+        return x                                   # x = dummy_text [B, 225, 640]
 
-# 🔹 Gabungkan visual dan teks
+# 🔹 Gabungan visual + teks
 class FeatureFusion(nn.Module):
-    def forward(self, v, t):                     # v = visual [B, N, E], t = text [B, N, E]
-        return torch.cat([v, t[:, :v.size(1), :]], dim=-1)  # Gabung di dimensi fitur
+    def forward(self, v, t):                      # v = [B, N, E], t = [B, N, E]
+        return torch.cat([v, t[:, :v.size(1), :]], dim=-1)
 
 # 🔹 Scale Transformation
 class ScaleTransformation(nn.Module):
     def __init__(self, in_dim, out_dim):
         super().__init__()
         self.linear = nn.Linear(in_dim, out_dim)
-    def forward(self, x): return self.linear(x)
+    def forward(self, x): 
+        return self.linear(x)
 
-# 🔹 Channel Normalisasi
+# 🔹 Channel Normalization
 class ChannelUnification(nn.Module):
     def __init__(self, dim):
         super().__init__()
         self.norm = nn.LayerNorm(dim)
-    def forward(self, x): return self.norm(x)
+    def forward(self, x): 
+        return self.norm(x)
 
-# 🔹 Attention Block
+# 🔹 Attention Block (sesuai retrain-5: num_heads=10)
 class InteractionBlock(nn.Module):
-    def __init__(self, dim, num_heads=8):
+    def __init__(self, dim, num_heads=NUM_HEADS):
         super().__init__()
         self.attn = nn.MultiheadAttention(dim, num_heads=num_heads, batch_first=True)
-    def forward(self, x): return self.attn(x, x, x)[0]
+    def forward(self, x): 
+        return self.attn(x, x, x)[0]
 
-# 🔹 CSA Dummy (agregasi skala)
+# 🔹 CSA (agregasi skala sederhana)
 class CrossScaleAggregation(nn.Module):
-    def forward(self, x): return x.mean(dim=1, keepdim=True)  # [B, 1, D]
+    def forward(self, x): 
+        return x.mean(dim=1, keepdim=True)  # [B, 1, D]
 
 # 🔹 Linear Head
 class HamburgerHead(nn.Module):
     def __init__(self, in_dim, out_dim):
         super().__init__()
         self.linear = nn.Linear(in_dim, out_dim)
-    def forward(self, x): return self.linear(x)
+    def forward(self, x): 
+        return self.linear(x)
 
 # 🔹 Multi-Label Classifier
 class MLPClassifier(nn.Module):
@@ -101,11 +108,13 @@ class MLPClassifier(nn.Module):
             nn.ReLU(),
             nn.Linear(256, num_classes)
         )
-    def forward(self, x): return self.mlp(x)
+    def forward(self, x): 
+        return self.mlp(x)
 
-# ✅ Gabungkan semuanya ke dalam HSVLTModel
+# ==== MODEL ====
 class HSVLTModel(nn.Module):
-    def __init__(self, img_size=210, patch_size=14, emb_size=512, num_classes=6):
+    def __init__(self, img_size=210, patch_size=14, emb_size=HIDDEN_DIM,
+                 num_classes=6, num_heads=NUM_HEADS, num_layers=NUM_LAYERS):
         super().__init__()
         self.patch_embed = PatchEmbedding(img_size, patch_size, emb_size)
         self.word_embed = WordEmbedding(emb_size)
@@ -113,10 +122,7 @@ class HSVLTModel(nn.Module):
         self.scale_transform = ScaleTransformation(emb_size * 2, emb_size)
         self.channel_unification = ChannelUnification(emb_size)
         self.interaction_blocks = nn.Sequential(
-            InteractionBlock(emb_size, num_heads=8),
-            InteractionBlock(emb_size, num_heads=8),
-            InteractionBlock(emb_size, num_heads=8),
-            InteractionBlock(emb_size, num_heads=8)
+            *[InteractionBlock(emb_size, num_heads=num_heads) for _ in range(num_layers)]
         )
         self.csa = CrossScaleAggregation()
         self.head = HamburgerHead(emb_size, emb_size)
@@ -124,20 +130,23 @@ class HSVLTModel(nn.Module):
 
     def forward(self, image, text):
         image_feat = self.patch_embed(image)         # [B, N, E]
-        text_feat = self.word_embed(text)            # [B, N, E]
-        x = self.concat(image_feat, text_feat)       # Gabung visual & teks
+        text_feat  = self.word_embed(text)           # [B, N, E]
+        x = self.concat(image_feat, text_feat)
         x = self.scale_transform(x)
         x = self.channel_unification(x)
         x = self.interaction_blocks(x)
         x = self.csa(x)
         x = self.head(x)
-        x = x.mean(dim=1)                            # Agregasi fitur patch
+        x = x.mean(dim=1)                            # [B, E]
         return self.classifier(x)                    # [B, num_classes]
-
-import traceback  # Tambahkan ini di atas file jika belum ada
 
 # --- 4. Load Model ---
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
+
+# Safety: cek konsistensi panjang THRESHOLDS
+if len(THRESHOLDS) != len(LABELS):
+    st.error("Panjang THRESHOLDS tidak sama dengan jumlah LABELS.")
+    st.stop()
 
 try:
     with safe_open(MODEL_PATH, framework="pt", device=device) as f:
@@ -146,7 +155,9 @@ try:
     model = HSVLTModel(
         patch_size=PATCH_SIZE,
         emb_size=HIDDEN_DIM,
-        num_classes=len(LABELS)
+        num_classes=len(LABELS),
+        num_heads=NUM_HEADS,
+        num_layers=NUM_LAYERS
     ).to(device)
 
     model.load_state_dict(state_dict, strict=True)
@@ -154,10 +165,8 @@ try:
 
 except Exception as e:
     st.error(f"❌ Gagal memuat model: {e}")
-    st.code(traceback.format_exc())  # ← tampilkan traceback asli di UI
+    st.code(traceback.format_exc())
     st.stop()
-
-
 
 # --- 5. Transformasi Gambar ---
 transform = transforms.Compose([
@@ -178,24 +187,30 @@ if uploaded_file is not None:
     st.image(image, caption="Gambar Input", use_container_width=True)
 
     input_tensor = transform(image).unsqueeze(0).to(device)
-    dummy_text = torch.randn((1, (IMAGE_SIZE // PATCH_SIZE) ** 2, HIDDEN_DIM)).to(device)
+
+    # === penting: zeros (bukan randn) agar konsisten dgn training retrain-5
+    num_tokens = (IMAGE_SIZE // PATCH_SIZE) ** 2  # 225
+    dummy_text = torch.zeros((1, num_tokens, HIDDEN_DIM), device=device)
 
     with torch.no_grad():
         outputs = model(input_tensor, dummy_text)
         probs = torch.sigmoid(outputs).cpu().numpy()[0].tolist()
 
-    detected_labels = [(label, prob) for label, prob in zip(LABELS, probs) if prob >= THRESHOLD]
+    # --- pakai threshold per-kelas ---
+    detected_labels = [
+        (label, prob) for label, prob, thr in zip(LABELS, probs, THRESHOLDS) if prob >= thr
+    ]
     detected_labels.sort(key=lambda x: x[1], reverse=True)
 
+    # Statistik tambahan
     max_prob = max(probs)
     sorted_probs = sorted(probs, reverse=True)
     second_max_prob = sorted_probs[1] if len(sorted_probs) > 1 else 0.0
     mean_prob = sum(probs) / len(probs)
-    high_conf_labels = [(lbl, p) for lbl, p in zip(LABELS, probs) if p > 0.7]
 
-    entropy = -sum([p * math.log(p + 1e-8) for p in probs]) / len(probs)
-    high_conf_count = len([p for p in probs if p > 0.2])
-    is_ood = (high_conf_count < 2)
+    # OOD sederhana: hitung berapa label yang melewati threshold per-kelas
+    high_conf_count = sum(int(p >= t) for p, t in zip(probs, THRESHOLDS))
+    is_ood = (high_conf_count < 1)
 
     st.subheader("🔍 Label Terdeteksi:")
 
@@ -209,7 +224,9 @@ if uploaded_file is not None:
             st.warning("🚫 Tidak ada label yang melewati ambang batas.")
 
     with st.expander("📊 Lihat Semua Probabilitas"):
+        # Entropy rata-rata (info saja)
+        entropy = -sum([p * math.log(p + 1e-8) for p in probs]) / len(probs)
         st.write(f"📊 mean_prob: {mean_prob:.3f} | entropy: {entropy:.3f}")
-        for label, prob in zip(LABELS, probs):
-            st.write(f"{label}: {prob:.2%}")
-
+        for label, prob, thr in zip(LABELS, probs, THRESHOLDS):
+            pass_thr = "✓" if prob >= thr else "✗"
+            st.write(f"{label}: {prob:.2%} (thr {thr:.2f}) {pass_thr}")
