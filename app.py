@@ -247,7 +247,7 @@ if uploaded_file is not None:
     if is_ood and not primary and not fallback:
         st.warning("🚫 Gambar tidak mengandung buah yang dikenali.")
     else:
-        # yang benar-benar melewati threshold per-kelas
+        # yang benar-benar melewati threshold per-kelas 
         for label, prob in primary:
             st.write(f"✅ *{label}* ({prob:.2%})")
         # tambahan via Top-K (kemungkinan)
