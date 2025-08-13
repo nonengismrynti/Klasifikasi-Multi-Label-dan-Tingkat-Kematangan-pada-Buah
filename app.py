@@ -7,6 +7,7 @@ from PIL import Image
 import gdown
 import os
 import math
+import numpy as np
 import traceback  # <-- tambah
 
 # --- 1. Setup ---
@@ -40,7 +41,6 @@ if not os.path.exists(MODEL_PATH) or os.path.getsize(MODEL_PATH) < 50000:
     download_model()
 
 # --- 3. Komponen Model ---
-# 🔹 Patch Embedding
 class PatchEmbedding(nn.Module):
     def __init__(self, img_size, patch_size, emb_size):
         super().__init__()
@@ -50,56 +50,48 @@ class PatchEmbedding(nn.Module):
         x = x.flatten(2).transpose(1, 2)          # [B, num_patches, emb_size]
         return x
 
-# 🔹 Word Embedding (dummy: pass-through)
 class WordEmbedding(nn.Module):
     def __init__(self, dim):
         super().__init__()
-    def forward(self, x): 
+    def forward(self, x):
         return x                                   # x = dummy_text [B, 225, 640]
 
-# 🔹 Gabungan visual + teks
 class FeatureFusion(nn.Module):
     def forward(self, v, t):                      # v = [B, N, E], t = [B, N, E]
         return torch.cat([v, t[:, :v.size(1), :]], dim=-1)
 
-# 🔹 Scale Transformation
 class ScaleTransformation(nn.Module):
     def __init__(self, in_dim, out_dim):
         super().__init__()
         self.linear = nn.Linear(in_dim, out_dim)
-    def forward(self, x): 
+    def forward(self, x):
         return self.linear(x)
 
-# 🔹 Channel Normalization
 class ChannelUnification(nn.Module):
     def __init__(self, dim):
         super().__init__()
         self.norm = nn.LayerNorm(dim)
-    def forward(self, x): 
+    def forward(self, x):
         return self.norm(x)
 
-# 🔹 Attention Block (sesuai retrain-5: num_heads=10)
 class InteractionBlock(nn.Module):
     def __init__(self, dim, num_heads=NUM_HEADS):
         super().__init__()
         self.attn = nn.MultiheadAttention(dim, num_heads=num_heads, batch_first=True)
-    def forward(self, x): 
+    def forward(self, x):
         return self.attn(x, x, x)[0]
 
-# 🔹 CSA (agregasi skala sederhana)
 class CrossScaleAggregation(nn.Module):
-    def forward(self, x): 
+    def forward(self, x):
         return x.mean(dim=1, keepdim=True)  # [B, 1, D]
 
-# 🔹 Linear Head
 class HamburgerHead(nn.Module):
     def __init__(self, in_dim, out_dim):
         super().__init__()
         self.linear = nn.Linear(in_dim, out_dim)
-    def forward(self, x): 
+    def forward(self, x):
         return self.linear(x)
 
-# 🔹 Multi-Label Classifier
 class MLPClassifier(nn.Module):
     def __init__(self, in_dim, num_classes):
         super().__init__()
@@ -108,7 +100,7 @@ class MLPClassifier(nn.Module):
             nn.ReLU(),
             nn.Linear(256, num_classes)
         )
-    def forward(self, x): 
+    def forward(self, x):
         return self.mlp(x)
 
 # ==== MODEL ====
@@ -176,25 +168,117 @@ transform = transforms.Compose([
                          std=[0.229, 0.224, 0.225])
 ])
 
-# --- 6. Streamlit UI ---
+# ==========================================================
+# 6. Sliding Window (cropping per-bagian saat prediksi)
+# ==========================================================
+def _gen_starts(total: int, size: int, stride: int):
+    """Buat titik awal agar ujung kanan/bawah selalu ter-cover."""
+    if total <= size:
+        return [0]
+    starts = list(range(0, total - size + 1, stride))
+    if starts[-1] != total - size:
+        starts.append(total - size)
+    return starts
+
+def sliding_window_crops(pil_img: Image.Image, window_size: int, overlap: float):
+    """
+    Return:
+      crops: list[PIL.Image]
+      rects: list[(x0,y0,x1,y1)]
+    """
+    w, h = pil_img.size
+    size = min(window_size, w, h)  # jangan lebih besar dari sisi terkecil
+    stride = max(1, int(size * (1 - overlap)))
+
+    xs = _gen_starts(w, size, stride)
+    ys = _gen_starts(h, size, stride)
+
+    crops, rects = [], []
+    for y in ys:
+        for x in xs:
+            rect = (x, y, x + size, y + size)
+            crops.append(pil_img.crop(rect))
+            rects.append(rect)
+    return crops, rects, size, stride, (len(xs), len(ys))
+
+def infer_with_optional_sliding(pil_img: Image.Image,
+                                use_sliding: bool,
+                                window_size: int,
+                                overlap: float,
+                                agg: str = "max"):
+    """
+    Menghasilkan vektor probabilitas per-kelas.
+    Jika use_sliding=True, akan agregasi dari semua jendela (max/mean).
+    """
+    num_tokens = (IMAGE_SIZE // PATCH_SIZE) ** 2  # 225
+
+    if not use_sliding:
+        input_tensor = transform(pil_img).unsqueeze(0).to(device)
+        dummy_text = torch.zeros((1, num_tokens, HIDDEN_DIM), device=device)
+        with torch.no_grad():
+            logits = model(input_tensor, dummy_text)
+            probs = torch.sigmoid(logits).cpu().numpy()[0]
+        detail = {"num_windows": 1, "grid": (1, 1)}
+        return probs, detail
+
+    # Sliding window path
+    crops, rects, size, stride, grid = sliding_window_crops(pil_img, window_size, overlap)
+
+    # batching biar cepat
+    tensors = [transform(c).unsqueeze(0) for c in crops]
+    batch = torch.cat(tensors, dim=0).to(device)
+
+    with torch.no_grad():
+        dummy_text = torch.zeros((batch.size(0), num_tokens, HIDDEN_DIM), device=device)
+        logits = model(batch, dummy_text)
+        probs_all = torch.sigmoid(logits).cpu().numpy()  # [N, C]
+
+    if agg == "mean":
+        probs = probs_all.mean(axis=0)
+    else:  # default max
+        probs = probs_all.max(axis=0)
+
+    detail = {
+        "num_windows": probs_all.shape[0],
+        "grid": grid,
+        "stride": stride,
+        "win_size": size,
+    }
+    return probs, detail
+
+# --- 7. Streamlit UI ---
 st.title("🍉 Klasifikasi Multi-Label Buah")
 st.write("Upload gambar buah, sistem akan mendeteksi beberapa label sekaligus. Jika bukan buah, akan ditolak.")
+st.caption("🔧 Sliding window diterapkan *saat pengujian/prediksi* untuk memotong gambar jadi beberapa bagian agar pembacaan objek terpisah.")
 
 uploaded_file = st.file_uploader("Unggah gambar buah", type=['jpg', 'jpeg', 'png'])
+
+# Panel pengaturan sliding
+use_sliding = st.checkbox("Aktifkan sliding window (crop per-bagian)", value=True)
+agg = st.selectbox("Metode agregasi skor antar-jendela", ["max", "mean"], index=0,
+                   help="max = ambil skor tertinggi per-kelas; mean = rata-rata.")
+win_size_px = None
+overlap = None
 
 if uploaded_file is not None:
     image = Image.open(uploaded_file).convert('RGB')
     st.image(image, caption="Gambar Input", use_container_width=True)
 
-    input_tensor = transform(image).unsqueeze(0).to(device)
+    if use_sliding:
+        w, h = image.size
+        default_ws = min(max(210, min(w, h)//2), min(w, h))  # default aman
+        win_size_px = st.slider("Ukuran jendela (px)", 128, min(1024, min(w, h)), default_ws, step=16)
+        overlap = st.slider("Overlap antar-jendela", 0.0, 0.9, 0.30, step=0.05)
 
-    # === penting: zeros (bukan randn) agar konsisten dgn training retrain-5
-    num_tokens = (IMAGE_SIZE // PATCH_SIZE) ** 2  # 225
-    dummy_text = torch.zeros((1, num_tokens, HIDDEN_DIM), device=device)
-
-    with torch.no_grad():
-        outputs = model(input_tensor, dummy_text)
-        probs = torch.sigmoid(outputs).cpu().numpy()[0].tolist()
+    # === infer (single atau sliding) ===
+    probs, detail = infer_with_optional_sliding(
+        image,
+        use_sliding=use_sliding,
+        window_size=win_size_px if use_sliding else IMAGE_SIZE,
+        overlap=overlap if use_sliding else 0.0,
+        agg=agg
+    )
+    probs = probs.tolist()
 
     # --- pakai threshold per-kelas ---
     detected_labels = [
@@ -203,17 +287,15 @@ if uploaded_file is not None:
     detected_labels.sort(key=lambda x: x[1], reverse=True)
 
     # Statistik tambahan
-    max_prob = max(probs)
-    sorted_probs = sorted(probs, reverse=True)
-    second_max_prob = sorted_probs[1] if len(sorted_probs) > 1 else 0.0
-    mean_prob = sum(probs) / len(probs)
+    max_prob = float(np.max(probs))
+    second_max_prob = float(np.partition(probs, -2)[-2]) if len(probs) > 1 else 0.0
+    mean_prob = float(np.mean(probs))
 
-    # OOD sederhana: hitung berapa label yang melewati threshold per-kelas
+    # OOD sederhana: jumlah label >= threshold
     high_conf_count = sum(int(p >= t) for p, t in zip(probs, THRESHOLDS))
     is_ood = (high_conf_count < 1)
 
     st.subheader("🔍 Label Terdeteksi:")
-
     if is_ood:
         st.warning("🚫 Gambar tidak mengandung buah yang dikenali.")
     else:
@@ -224,9 +306,12 @@ if uploaded_file is not None:
             st.warning("🚫 Tidak ada label yang melewati ambang batas.")
 
     with st.expander("📊 Lihat Semua Probabilitas"):
-        # Entropy rata-rata (info saja)
         entropy = -sum([p * math.log(p + 1e-8) for p in probs]) / len(probs)
         st.write(f"📊 mean_prob: {mean_prob:.3f} | entropy: {entropy:.3f}")
+        if use_sliding:
+            st.write(f"🪟 windows: {detail['num_windows']} | grid: {detail['grid']} | "
+                     f"win_size: {detail.get('win_size','-')} | stride: {detail.get('stride','-')}")
+            st.caption("Catatan: skor kelas adalah agregasi dari semua jendela.")
         for label, prob, thr in zip(LABELS, probs, THRESHOLDS):
             pass_thr = "✓" if prob >= thr else "✗"
             st.write(f"{label}: {prob:.2%} (thr {thr:.2f}) {pass_thr}")
