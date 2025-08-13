@@ -6,93 +6,102 @@ import torchvision.transforms as transforms # Transformasi gambar
 from PIL import Image                       # Baca gambar
 import gdown                                # Download dari Google Drive
 import os                                   # Utilitas file/path
-import math                                 # Untuk hitung entropi
+import math                                 # Untuk hitung entropi (informasi)
 import traceback                            # Tampilkan traceback saat error
-import numpy as np                          # Agregasi antar-crop
+import numpy as np                          # Agregasi antar-crop (sliding window)
 
-# --- 1) Setup umum ---
+# ========================
+# 1) Setup umum & opsi UI
+# ========================
 MODEL_URL  = 'https://drive.google.com/uc?id=1GPPxPSpodNGJHSeWyrTVwRoSjwW3HaA8'  # Link model di Drive
 MODEL_PATH = 'model_3.safetensors'                                               # Nama file lokal model
 
-# Urutan label harus sama dengan saat training
-LABELS = [
+LABELS = [                                   # Urutan label HARUS sama seperti saat training
     'alpukat_matang', 'alpukat_mentah',
     'belimbing_matang', 'belimbing_mentah',
     'mangga_matang', 'mangga_mentah'
 ]
 
-# ---- Parameter model + inferensi (mengikuti retrain-5) ----
-NUM_HEADS   = 10               # Jumlah attention heads
-NUM_LAYERS  = 4                # Banyak InteractionBlock
-HIDDEN_DIM  = 640              # Dimensi embedding
-PATCH_SIZE  = 14               # Ukuran patch conv
-IMAGE_SIZE  = 210              # Ukuran input ke model
-THRESHOLDS  = [0.01, 0.01, 0.01, 0.06, 0.02, 0.01]  # Threshold per-kelas (dari validasi)
+SHOW_VOTES = False                           # ← Tampilkan "votes" di UI? (False = disembunyikan)
 
-# Sliding-window (disarankan pembimbing: dilakukan di tahap prediksi/aplikasi)
-WIN_FRACS   = (1.0, 0.7, 0.5, 0.4)  # Tambah skala kecil supaya tiap buah lebih terisolasi
-STRIDE_FRAC = 0.33                  # Overlap ~67% biar gak lompat objek
-MIN_VOTES   = 2                     # Minimal jumlah crop yang "setuju" agar label dihitung
+# ======================================================
+# 2) Parameter model + inferensi (mengikuti retrain-5)
+# ======================================================
+NUM_HEADS   = 10                             # Jumlah attention heads
+NUM_LAYERS  = 4                              # Banyak InteractionBlock
+HIDDEN_DIM  = 640                            # Dimensi embedding
+PATCH_SIZE  = 14                             # Ukuran patch conv
+IMAGE_SIZE  = 210                            # Ukuran input ke model
+THRESHOLDS  = [0.01, 0.01, 0.01, 0.06, 0.02, 0.01]  # Threshold per-kelas (hasil tuning validasi)
 
-# --- 2) Download model bila belum ada / korup ---
-def download_model():
+# Sliding-window (dipasang di tahap prediksi/aplikasi sesuai arahan dosen)
+WIN_FRACS   = (1.0, 0.7, 0.5, 0.4)           # Skala jendela relatif terhadap sisi terpendek
+STRIDE_FRAC = 0.33                           # Overlap ~67% (stride = 0.33 * window)
+MIN_VOTES   = 2                              # Minimal jumlah crop yang “setuju” agar label dihitung
+
+# ==========================================
+# 3) Download model bila belum ada/terdeteksi korup
+# ==========================================
+def download_model():                        # Fungsi unduh model dari Google Drive
     with st.spinner('🔄 Mengunduh ulang model dari Google Drive...'):
         gdown.download(MODEL_URL, MODEL_PATH, quiet=False, fuzzy=True)
 
-if not os.path.exists(MODEL_PATH) or os.path.getsize(MODEL_PATH) < 50000:
-    if os.path.exists(MODEL_PATH):
+if not os.path.exists(MODEL_PATH) or os.path.getsize(MODEL_PATH) < 50000:  # Cek eksistensi/ukuran minimal
+    if os.path.exists(MODEL_PATH):              # Jika file ada tapi kecil → kemungkinan korup
         st.warning("📦 Ukuran file model terlalu kecil, kemungkinan korup. Mengunduh ulang...")
-        os.remove(MODEL_PATH)
-    download_model()
+        os.remove(MODEL_PATH)                   # Hapus file korup
+    download_model()                            # Unduh ulang
 
-# --- 3) Komponen model (identik dengan saat training) ---
-class PatchEmbedding(nn.Module):
+# ======================================
+# 4) Komponen model (identik dgn training)
+# ======================================
+class PatchEmbedding(nn.Module):                # Ubah gambar → token patch
     def __init__(self, img_size, patch_size, emb_size):
         super().__init__()
         self.proj = nn.Conv2d(3, emb_size, kernel_size=patch_size, stride=patch_size)
     def forward(self, x):
-        x = self.proj(x)                 # [B, E, H/ps, W/ps]
-        x = x.flatten(2).transpose(1, 2) # [B, N, E]
+        x = self.proj(x)                        # [B, E, H/ps, W/ps]
+        x = x.flatten(2).transpose(1, 2)        # [B, N, E]
         return x
 
-class WordEmbedding(nn.Module):
+class WordEmbedding(nn.Module):                 # Dummy (kita pakai tensor nol saat inferensi)
     def __init__(self, dim): super().__init__()
-    def forward(self, x): return x       # dummy (kita pakai tensor nol di inferensi)
+    def forward(self, x): return x
 
-class FeatureFusion(nn.Module):
-    def forward(self, v, t):             # v,t: [B, N, E]
+class FeatureFusion(nn.Module):                 # Gabung visual + “teks” (dummy)
+    def forward(self, v, t):
         return torch.cat([v, t[:, :v.size(1), :]], dim=-1)  # → [B, N, 2E]
 
-class ScaleTransformation(nn.Module):
-    def __init__(self, in_dim, out_dim):
-        super().__init__(); self.linear = nn.Linear(in_dim, out_dim)
-    def forward(self, x): return self.linear(x)             # 2E → E
-
-class ChannelUnification(nn.Module):
-    def __init__(self, dim):
-        super().__init__(); self.norm = nn.LayerNorm(dim)
-    def forward(self, x): return self.norm(x)
-
-class InteractionBlock(nn.Module):
-    def __init__(self, dim, num_heads=NUM_HEADS):
-        super().__init__(); self.attn = nn.MultiheadAttention(dim, num_heads=num_heads, batch_first=True)
-    def forward(self, x): return self.attn(x, x, x)[0]
-
-class CrossScaleAggregation(nn.Module):
-    def forward(self, x): return x.mean(dim=1, keepdim=True)  # [B, 1, E]
-
-class HamburgerHead(nn.Module):
+class ScaleTransformation(nn.Module):           # Proyeksi 2E → E
     def __init__(self, in_dim, out_dim):
         super().__init__(); self.linear = nn.Linear(in_dim, out_dim)
     def forward(self, x): return self.linear(x)
 
-class MLPClassifier(nn.Module):
+class ChannelUnification(nn.Module):            # LayerNorm token
+    def __init__(self, dim):
+        super().__init__(); self.norm = nn.LayerNorm(dim)
+    def forward(self, x): return self.norm(x)
+
+class InteractionBlock(nn.Module):              # Self-attention block
+    def __init__(self, dim, num_heads=NUM_HEADS):
+        super().__init__(); self.attn = nn.MultiheadAttention(dim, num_heads=num_heads, batch_first=True)
+    def forward(self, x): return self.attn(x, x, x)[0]
+
+class CrossScaleAggregation(nn.Module):         # Agregasi sederhana antar token
+    def forward(self, x): return x.mean(dim=1, keepdim=True)  # [B, 1, E]
+
+class HamburgerHead(nn.Module):                 # Linear head penyesuaian
+    def __init__(self, in_dim, out_dim):
+        super().__init__(); self.linear = nn.Linear(in_dim, out_dim)
+    def forward(self, x): return self.linear(x)
+
+class MLPClassifier(nn.Module):                 # Klasifier multi-label (logits)
     def __init__(self, in_dim, num_classes):
         super().__init__()
         self.mlp = nn.Sequential(nn.Linear(in_dim, 256), nn.ReLU(), nn.Linear(256, num_classes))
     def forward(self, x): return self.mlp(x)
 
-class HSVLTModel(nn.Module):
+class HSVLTModel(nn.Module):                    # Rangkaian lengkap model
     def __init__(self, img_size=210, patch_size=14, emb_size=HIDDEN_DIM,
                  num_classes=6, num_heads=NUM_HEADS, num_layers=NUM_LAYERS):
         super().__init__()
@@ -109,140 +118,157 @@ class HSVLTModel(nn.Module):
         self.classifier = MLPClassifier(emb_size, num_classes)
 
     def forward(self, image, text):
-        image_feat = self.patch_embed(image)     # [B, N, E]
-        text_feat  = self.word_embed(text)       # [B, N, E]
-        x = self.concat(image_feat, text_feat)   # [B, N, 2E]
-        x = self.scale_transform(x)              # [B, N, E]
-        x = self.channel_unification(x)          # [B, N, E]
-        x = self.interaction_blocks(x)           # [B, N, E]
-        x = self.csa(x)                          # [B, 1, E]
-        x = self.head(x)                         # [B, 1, E]
-        x = x.mean(dim=1)                        # [B, E]
-        return self.classifier(x)                # [B, C] (logits)
+        image_feat = self.patch_embed(image)    # [B, N, E]
+        text_feat  = self.word_embed(text)      # [B, N, E] (dummy zeros)
+        x = self.concat(image_feat, text_feat)  # [B, N, 2E]
+        x = self.scale_transform(x)             # [B, N, E]
+        x = self.channel_unification(x)         # [B, N, E]
+        x = self.interaction_blocks(x)          # [B, N, E]
+        x = self.csa(x)                         # [B, 1, E]
+        x = self.head(x)                        # [B, 1, E]
+        x = x.mean(dim=1)                       # [B, E]
+        return self.classifier(x)               # [B, C] logits
 
-# --- 4) Load model ---
-device = 'cuda' if torch.cuda.is_available() else 'cpu'
-if len(THRESHOLDS) != len(LABELS):
+# ==================
+# 5) Load model
+# ==================
+device = 'cuda' if torch.cuda.is_available() else 'cpu'   # Pilih device (GPU jika ada)
+if len(THRESHOLDS) != len(LABELS):                         # Validasi panjang threshold
     st.error("Panjang THRESHOLDS tidak sama dengan jumlah LABELS."); st.stop()
 
 try:
-    with safe_open(MODEL_PATH, framework="pt", device=device) as f:
-        state_dict = {k: f.get_tensor(k) for k in f.keys()}
-    model = HSVLTModel(
+    with safe_open(MODEL_PATH, framework="pt", device=device) as f:  # Buka file .safetensors
+        state_dict = {k: f.get_tensor(k) for k in f.keys()}          # Ambil semua tensor
+    model = HSVLTModel(                                              # Inisialisasi arsitektur
         patch_size=PATCH_SIZE, emb_size=HIDDEN_DIM, num_classes=len(LABELS),
         num_heads=NUM_HEADS, num_layers=NUM_LAYERS
     ).to(device)
-    model.load_state_dict(state_dict, strict=True)
-    model.eval()
+    model.load_state_dict(state_dict, strict=True)                   # Load bobot
+    model.eval()                                                     # Mode evaluasi
 except Exception as e:
-    st.error(f"❌ Gagal memuat model: {e}")
-    st.code(traceback.format_exc()); st.stop()
+    st.error(f"❌ Gagal memuat model: {e}")                           # Pesan gagal
+    st.code(traceback.format_exc()); st.stop()                       # Tampilkan traceback & stop
 
-# --- 5) Transformasi gambar ---
+# ===========================
+# 6) Transformasi gambar
+# ===========================
 transform = transforms.Compose([
-    transforms.Resize((IMAGE_SIZE, IMAGE_SIZE)),
-    transforms.ToTensor(),
-    transforms.Normalize(mean=[0.485, 0.456, 0.406],
+    transforms.Resize((IMAGE_SIZE, IMAGE_SIZE)),                    # Resize ke 210x210
+    transforms.ToTensor(),                                          # Ke tensor [0..1]
+    transforms.Normalize(mean=[0.485, 0.456, 0.406],                # Normalisasi (ImageNet)
                          std =[0.229, 0.224, 0.225])
 ])
 
-# --- 5.1) Sliding-window inference + agregasi ---
+# ==========================================================
+# 7) Sliding-window inference + agregasi (MAX antar-crop)
+# ==========================================================
 def sliding_window_infer(image_pil, model, transform, device,
                          hidden_dim, patch_size,
                          win_fracs=WIN_FRACS, stride_frac=STRIDE_FRAC,
                          include_full=False):
-    """Potong gambar (multi-skala, overlap), prediksi per-crop, kembalikan:
-       - probs_max:  max antar-crop per kelas [C]
-       - probs_crops: semua probabilitas per crop [N, C]
     """
-    W, H = image_pil.size
-    short = min(W, H)
-    crops = []
+    Potong gambar menjadi beberapa crop overlap (multi-skala),
+    prediksi per-crop, lalu agregasi probabilitas per kelas
+    dengan operasi MAX antar-crop.
+    """
+    W, H = image_pil.size                                          # Lebar & tinggi asli
+    short = min(W, H)                                              # Sisi terpendek (basis window)
+    crops = []                                                     # Kumpulan crop
 
-    for wf in win_fracs:
-        win  = max(int(short * wf), 64)            # ukuran jendela
-        step = max(1, int(win * stride_frac))      # stride (overlap)
-        for top in range(0, max(H - win + 1, 1), step):
-            for left in range(0, max(W - win + 1, 1), step):
-                crops.append(image_pil.crop((left, top, left + win, top + win)))
+    for wf in win_fracs:                                           # Loop tiap skala window
+        win  = max(int(short * wf), 64)                            # Ukuran window (min 64 px)
+        step = max(1, int(win * stride_frac))                      # Stride (overlap tinggi → step kecil)
+        for top in range(0, max(H - win + 1, 1), step):            # Iterasi vertikal
+            for left in range(0, max(W - win + 1, 1), step):       # Iterasi horizontal
+                crops.append(image_pil.crop((left, top, left + win, top + win)))  # Ambil crop persegi
 
-    if include_full:
-        crops.append(image_pil)                    # opsional: tambahkan full image
+    if include_full:                                               # Opsional: tambahkan full image
+        crops.append(image_pil)
 
-    num_tokens = (IMAGE_SIZE // patch_size) ** 2
-    probs_list = []
-    model.eval()
-    with torch.no_grad():
+    num_tokens = (IMAGE_SIZE // patch_size) ** 2                   # 225 token (15x15)
+    probs_list = []                                                # Daftar probabilitas per-crop
+    model.eval()                                                   # Pastikan eval
+    with torch.no_grad():                                          # Non-grad untuk inferensi
         for crop in crops:
-            x = transform(crop).unsqueeze(0).to(device)
-            dummy_text = torch.zeros((1, num_tokens, hidden_dim), device=device)  # konsisten dgn training
-            p = torch.sigmoid(model(x, dummy_text)).cpu().numpy()[0]              # [C]
-            probs_list.append(p)
+            x = transform(crop).unsqueeze(0).to(device)            # Transform + batch=1
+            dummy_text = torch.zeros((1, num_tokens, hidden_dim),  # Dummy text zeros (konsisten training)
+                                      device=device)
+            logits = model(x, dummy_text)                          # Forward → logits [1, C]
+            p = torch.sigmoid(logits).cpu().numpy()[0]             # Sigmoid → probabilitas [C]
+            probs_list.append(p)                                   # Simpan hasil
 
-    probs_crops = np.stack(probs_list, axis=0)     # [N, C]
-    probs_max   = probs_crops.max(axis=0)          # agregasi MAX antar-crop
-    return probs_max, probs_crops
+    probs_crops = np.stack(probs_list, axis=0)                     # [N, C] semua crop
+    probs_max   = probs_crops.max(axis=0)                          # Agregasi MAX antar-crop → [C]
+    return probs_max, probs_crops                                   # Kembalikan vektor & matriks
 
-# --- 6) UI ---
-st.title("🍉 Klasifikasi Multi-Label Buah")
-st.write("Upload gambar buah; sistem akan mendeteksi beberapa label sekaligus.")
+# ==========
+# 8) UI App
+# ==========
+st.title("🍉 Klasifikasi Multi-Label Buah")                         # Judul
+st.write("Upload gambar buah; sistem akan mendeteksi beberapa label sekaligus.")  # Deskripsi
 
-uploaded_file = st.file_uploader("Unggah gambar buah", type=['jpg', 'jpeg', 'png'])
+uploaded_file = st.file_uploader("Unggah gambar buah", type=['jpg', 'jpeg', 'png'])  # Uploader
 
-if uploaded_file is not None:
-    image = Image.open(uploaded_file).convert('RGB')
-    st.image(image, caption="Gambar Input", use_container_width=True)
+if uploaded_file is not None:                                       # Jika ada file diunggah
+    image = Image.open(uploaded_file).convert('RGB')                # Baca sebagai RGB
+    st.image(image, caption="Gambar Input", use_container_width=True)  # Tampilkan
 
-    # 1) Sliding-window (multi-skala, overlap besar)
+    # (1) Prediksi dengan Sliding-Window
     probs_max, probs_crops = sliding_window_infer(
         image_pil=image, model=model, transform=transform, device=device,
         hidden_dim=HIDDEN_DIM, patch_size=PATCH_SIZE,
         win_fracs=WIN_FRACS, stride_frac=STRIDE_FRAC, include_full=False
     )
-    probs = probs_max.tolist()
+    probs = probs_max.tolist()                                      # Ke list Python
 
-    # 2) Votes: berapa crop yang ≥ threshold per-kelas
+    # (2) Hitung votes: jumlah crop yang melewati threshold per-kelas
     votes = (probs_crops >= np.array(THRESHOLDS)).sum(axis=0).astype(int)  # [C]
 
-    # 3) Kandidat = skor ≥ threshold & votes cukup
+    # (3) Ambil kandidat: skor ≥ threshold dan votes ≥ MIN_VOTES
     candidates = {
-        lbl: (float(p), int(v))
+        lbl: (float(p), int(v))                                     # simpan (prob, votes)
         for lbl, p, thr, v in zip(LABELS, probs, THRESHOLDS, votes.tolist())
         if (p >= thr and v >= MIN_VOTES)
     }
 
-    # 4) Aturan eksklusif matang vs mentah (per buah pilih satu)
+    # (4) Aturan eksklusif matang vs mentah (per buah pilih satu label terbaik)
     pairs = [
         ('alpukat_matang', 'alpukat_mentah'),
         ('belimbing_matang', 'belimbing_mentah'),
         ('mangga_matang', 'mangga_mentah')
     ]
-    final_labels = []
+    final_labels = []                                               # Hasil akhir yang ditampilkan
     for a, b in pairs:
         has_a, has_b = a in candidates, b in candidates
-        if has_a and has_b:
+        if has_a and has_b:                                         # Jika dua-duanya lolos
             chosen = a if candidates[a][0] >= candidates[b][0] else b
-            final_labels.append((chosen, *candidates[chosen]))  # (label, prob, votes)
+            final_labels.append((chosen, *candidates[chosen]))      # (label, prob, votes)
         elif has_a:
             final_labels.append((a, *candidates[a]))
         elif has_b:
             final_labels.append((b, *candidates[b]))
 
-    final_labels.sort(key=lambda x: x[1], reverse=True)
+    final_labels.sort(key=lambda x: x[1], reverse=True)             # Urutkan dari skor tertinggi
 
-    # 5) Tampilkan
+    # (5) Tampilkan hasil 
     st.subheader("🔍 Label Terdeteksi:")
     if not final_labels:
         st.warning("🚫 Tidak ada label yang memenuhi kriteria (threshold + votes).")
     else:
         for label, prob, v in final_labels:
-            st.write(f"✅ *{label}* ({prob:.2%}) — votes: {v}")
+            if SHOW_VOTES:
+                st.write(f"✅ *{label}* ({prob:.2%}) — votes: {v}")  # Tampilkan votes (opsional)
+            else:
+                st.write(f"✅ *{label}* ({prob:.2%})")               # Tanpa votes
 
-    # Panel detail
+    # (6) Panel detail (opsional tampilkan votes sesuai flag)
     with st.expander("📊 Lihat Semua Probabilitas"):
-        mean_prob = float(np.mean(probs))
-        entropy   = -float(np.mean([p * math.log(p + 1e-8) for p in probs]))
+        mean_prob = float(np.mean(probs))                            # Rata-rata probabilitas
+        entropy   = -float(np.mean([p * math.log(p + 1e-8) for p in probs]))  # Entropi sederhana
         st.write(f"🪟 crops: {probs_crops.shape[0]} | mean_prob: {mean_prob:.3f} | entropy: {entropy:.3f}")
         for i, lbl in enumerate(LABELS):
-            pass_thr = "✓" if probs[i] >= THRESHOLDS[i] else "✗"
-            st.write(f"{lbl}: {probs[i]:.2%} (thr {THRESHOLDS[i]:.2f}) | votes={int(votes[i])} {pass_thr}")
+            pass_thr = "✓" if probs[i] >= THRESHOLDS[i] else "✗"    # Lolos threshold?
+            line = f"{lbl}: {probs[i]:.2%} (thr {THRESHOLDS[i]:.2f}) {pass_thr}"
+            if SHOW_VOTES:
+                line += f" | votes={int(votes[i])}"                  # Tambah votes jika ingin
+            st.write(line)
