@@ -274,5 +274,5 @@ if uploaded_file is not None:
         entropy   = -float(np.mean([p * math.log(p + 1e-8) for p in probs]))
         st.write(f"🪟 crops={probs_crops.shape[0]} | q={PERCENTILE_Q} | need_votes≥{need_votes} | mean_prob={mean_prob:.3f} | entropy={entropy:.3f}")
         for i, lbl in enumerate(LABELS):
-            pass_thr = "✓" if probs[i] >= THRESHOLDS[i] else "✗"
+            pass_thr = "✓" if probs[i] >= THRESHOLDS[i] else "✗" 
             st.write(f"{lbl}: {probs[i]:.2%} (thr {THRESHOLDS[i]:.2f}) | votes={int(votes[i])} {pass_thr}")
