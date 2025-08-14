@@ -31,11 +31,16 @@ SHOW_VOTES = False                                  # menampilkan jumlah "votes"
 NUM_HEADS, NUM_LAYERS, HIDDEN_DIM = 10, 4, 640
 PATCH_SIZE, IMAGE_SIZE = 14, 210
 
-# Parameter sliding-window & NMS
-WIN_FRACS, STRIDE_FRAC = (1.0, 0.7, 0.5, 0.4), 0.33    # skala jendela & overlap
-IOU_NMS  = 0.50                                         # IoU untuk NMS per-kelas
-IOU_PAIR = 0.30                                         # IoU untuk merge matang vs mentah
-IOU_XFAM = 0.50                                         # IoU suppression antar "keluarga buah"
+# ---------------------------
+# Parameter sliding-window & NMS (REVISI)
+# ---------------------------
+WIN_FRACS, STRIDE_FRAC = (1.0, 0.7, 0.5, 0.4), 0.33     # skala jendela & overlap
+IOU_NMS   = 0.30                                        # NMS lebih ketat supaya tidak banjir duplikat
+IOU_PAIR  = 0.30                                        # IoU untuk merge matang vs mentah
+IOU_XFAM  = 0.50                                        # IoU suppression antar "keluarga buah"
+DEDUP_IOU_SAMECLASS = 0.20                              # dedupe tambahan per-kelas setelah NMS
+SINGLE_OBJ_IOU      = 0.40                              # definisi overlap "1 lokasi" utk single-object
+SINGLE_OBJ_MIN_FRAC = 0.80                              # ≥80% box menumpuk → anggap 1 objek
 
 device = 'cuda' if torch.cuda.is_available() else 'cpu' # pilih GPU kalau ada
 
@@ -196,6 +201,40 @@ def nms_per_class(boxes, scores, thr):
         idxs = idxs[1:][[iou_xyxy(boxes[i], boxes[j]) <= thr for j in idxs[1:]]]
     return keep
 
+# ---------- DEDUPE & SINGLE-OBJECT (REVISI) ----------
+def dedupe_same_class(detections, iou_thr=DEDUP_IOU_SAMECLASS):
+    """Buang duplikat sisa di kelas yang sama; sisakan box yang saling cukup jauh."""
+    out = []
+    for c in range(len(LABELS)):
+        group = [d for d in detections if d["c"] == c]              # ambil satu kelas
+        group.sort(key=lambda d: d["score"], reverse=True)          # urut skor desc
+        kept = []
+        for d in group:
+            if all(iou_xyxy(d["box"], k["box"]) < iou_thr for k in kept):  # cukup jauh dari yang sudah disimpan?
+                kept.append(d)
+        out.extend(kept)
+    return out
+
+def is_single_object(boxes):
+    """Cek apakah mayoritas box menumpuk di satu lokasi (indikasi foto 1 objek)."""
+    if len(boxes) == 0:
+        return False
+    # pilih box terluas sebagai anchor
+    areas = [(b[2]-b[0])*(b[3]-b[1]) for b in boxes]
+    base = boxes[int(np.argmax(areas))]
+    # fraksi box yang overlap besar dengan anchor
+    frac = np.mean([iou_xyxy(base, b) >= SINGLE_OBJ_IOU for b in boxes])
+    return frac >= SINGLE_OBJ_MIN_FRAC
+
+def single_object_gate(dets):
+    """Jika 1 objek: kembalikan hanya 1 label dengan skor tertinggi."""
+    if not dets:
+        return dets
+    if is_single_object([d["box"] for d in dets]):
+        return [max(dets, key=lambda d: d["score"])]
+    return dets
+
+# ---------- PAIRING & CROSS-FAMILY ----------
 def merge_pairs(detections):
     """
     Gabungkan pasangan matang vs mentah per keluarga buah.
@@ -245,27 +284,15 @@ def cross_family_suppress(dets, thr=IOU_XFAM):
             kept.append(d)
     return kept
 
-def single_object_gate(dets, thr=0.50):
-    """
-    Mode satu objek: bila semua box tumpuk di satu lokasi (IoU tinggi),
-    pilih SATU label skor tertinggi saja.
-    """
-    if len(dets) <= 1:
-        return dets
-    base = dets[0]["box"]                                            # pakai box pertama sbg acuan
-    same_spot = all(iou_xyxy(base, d["box"]) >= thr for d in dets[1:])  # semua overlap besar?
-    if same_spot:
-        return [max(dets, key=lambda d: d["score"])]                 # pilih satu label terbaik
-    return dets
-
 def postprocess_with_nms(boxes, probs_crops, votes, min_votes, iou_nms=IOU_NMS):
     """
     Pipeline pasca-proses:
       1) Filter skor per-kelas + syarat votes.
-      2) NMS per-kelas → satu (atau beberapa) box terbaik per kelas.
-      3) Merge matang vs mentah per keluarga.
-      4) Cross-family suppression (antar keluarga buah).
-      5) Single-object gate (opsional) bila memang satu objek.
+      2) NMS per-kelas (ketat).
+      3) Dedupe per-kelas (buang sisa duplikat).
+      4) Merge matang vs mentah per keluarga.
+      5) Cross-family suppression (antar keluarga buah).
+      6) Single-object gate (jika semua box numpuk).
     """
     detections = []                                                  # kumpulan deteksi awal
     for c, label in enumerate(LABELS):
@@ -273,7 +300,7 @@ def postprocess_with_nms(boxes, probs_crops, votes, min_votes, iou_nms=IOU_NMS):
         mask = (scores >= THRESHOLDS[c])                             # lulus ambang?
         if not mask.any() or votes[c] < min_votes:                   # cukup votes?
             continue
-        keep = nms_per_class(boxes[mask], scores[mask], iou_nms)     # NMS per-kelas
+        keep = nms_per_class(boxes[mask], scores[mask], iou_nms)     # NMS per-kelas (ketat)
         for k in keep:
             detections.append({
                 "label": label,
@@ -281,10 +308,19 @@ def postprocess_with_nms(boxes, probs_crops, votes, min_votes, iou_nms=IOU_NMS):
                 "score": float(scores[mask][k]),
                 "box":  boxes[mask][k]
             })
-    # tahap gabungan & penekanan silang
-    dets = merge_pairs(detections)                                   # pilih matang/mentah terbaik
-    dets = cross_family_suppress(dets, thr=IOU_XFAM)                 # tekan antar keluarga
-    dets = single_object_gate(dets, thr=0.50)                        # opsional: kalau 1 objek → 1 label
+
+    # ---- DEDUPE per-kelas → kurangi sisa duplikat yang masih dekat
+    detections = dedupe_same_class(detections, DEDUP_IOU_SAMECLASS)
+
+    # ---- Pairing matang/mentah per keluarga
+    dets = merge_pairs(detections)
+
+    # ---- Penekanan antar keluarga (buah berbeda yang numpuk)
+    dets = cross_family_suppress(dets, thr=IOU_XFAM)
+
+    # ---- Jika 1 objek → tampilkan hanya 1 label
+    dets = single_object_gate(dets)
+
     return sorted(dets, key=lambda d: d["score"], reverse=True)      # urut skor desc
 
 # ===========================
