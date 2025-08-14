@@ -367,5 +367,5 @@ if uploaded_file:                                                    # bila ada 
             pass_thr = "✓" if probs_max[i] >= THRESHOLDS[i] else "✗"              # lulus ambang?
             line = f"{lbl}: {probs_max[i]:.2%} (thr {THRESHOLDS[i]:.2f}) {pass_thr}"
             if SHOW_VOTES:
-                line += f" | votes={int(votes[i])}"
+                line += f" | votes={int(votes[i])}" 
             st.write(line)
