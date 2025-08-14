@@ -7,7 +7,9 @@ from PIL import Image
 import gdown
 import os
 import math
-import traceback  # <-- tambah
+import traceback
+import numpy as np
+
 
 # --- 1. Setup ---
 MODEL_URL = 'https://drive.google.com/uc?id=1GPPxPSpodNGJHSeWyrTVwRoSjwW3HaA8'
