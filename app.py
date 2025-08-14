@@ -345,7 +345,7 @@ if uploaded_file is not None:
         if d["label"] not in unique_labels:
             unique_labels.append(d["label"])
 
-    st.subheader("🔍 Label Terdeteksi (setelah NMS):")
+    st.subheader("🔍 Label Terdeteksi:")
     if not unique_labels:
         st.warning("🚫 Tidak ada label yang memenuhi kriteria (threshold + votes + NMS).")
     else:
