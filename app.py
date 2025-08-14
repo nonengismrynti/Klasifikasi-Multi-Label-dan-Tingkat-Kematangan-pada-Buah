@@ -42,8 +42,9 @@ MIN_VOTES   = 2                              # Minimal jumlah crop yang “setuj
 # ==========================
 # 2b) Parameter NMS (baru)
 # ==========================
-NMS_IOU            = 0.5                     # IOU threshold untuk NMS per-kelas
-NMS_MAX_PER_CLASS  = 5                       # Maksimal box per kelas setelah NMS (boleh disetel)
+NMS_IOU            = 0.5                     # IoU untuk NMS per-kelas (tetap, tidak dapat diubah dari UI)
+NMS_MAX_PER_CLASS  = 5                       # Batas jumlah box per kelas setelah NMS (tetap)
+SHOW_BOXES         = True                    # (baru) kontrol internal: tampilkan bounding box (tanpa UI)
 
 # ==========================================
 # 3) Download model bila belum ada/terdeteksi korup
@@ -308,12 +309,12 @@ def draw_detections(image_pil, detections):
 st.title("🍉 Klasifikasi Multi-Label Buah.")
 st.write("Upload gambar buahnya yaa.")
 
-# Opsi NMS dari sidebar (bisa kamu ubah saat uji)
-with st.sidebar:
-    st.header("⚙️ Opsi Inference")
-    NMS_IOU = st.slider("NMS IoU Threshold", 0.1, 0.9, NMS_IOU, 0.05)
-    NMS_MAX_PER_CLASS = st.number_input("Maksimal Box per Kelas", 1, 20, NMS_MAX_PER_CLASS, 1)
-    SHOW_BOXES = st.checkbox("Tampilkan bounding box hasil NMS", value=True)
+# # Opsi NMS dari sidebar (bisa kamu ubah saat uji)
+# with st.sidebar:
+#     st.header("⚙️ Opsi Inference")
+#     NMS_IOU = st.slider("NMS IoU Threshold", 0.1, 0.9, NMS_IOU, 0.05)
+#     NMS_MAX_PER_CLASS = st.number_input("Maksimal Box per Kelas", 1, 20, NMS_MAX_PER_CLASS, 1)
+#     SHOW_BOXES = st.checkbox("Tampilkan bounding box hasil NMS", value=True)
 
 uploaded_file = st.file_uploader("Unggah gambar buah", type=['jpg', 'jpeg', 'png'])
 
@@ -376,10 +377,17 @@ if uploaded_file is not None:
             line += f" | votes={int(votes[i])}"
         st.write(line)
 
-    # (6) Daftar semua deteksi (box) pasca-NMS
-    with st.expander("📦 Semua Deteksi (setelah NMS)"):
-        if len(detections) == 0:
-            st.write("—")
-        else:
-            for d in detections:
-                st.write(f"- {d['label']} | skor {d['score']:.2%} | box {d['box']}")
+    # ===== Debug expander "Semua Deteksi (setelah NMS)" dinonaktifkan di produksi =====
+    SHOW_DEBUG_DETECTIONS = False                 # Flag internal: kalau True, tampilkan daftar semua box
+
+    if SHOW_DEBUG_DETECTIONS:                     # Hanya akan dieksekusi bila diaktifkan manual
+        with st.expander("📦 Semua Deteksi (setelah NMS)"):  # Bungkus daftar box di dalam expander
+            if len(detections) == 0:              # Jika tidak ada deteksi tersisa
+                st.write("—")                     # Tampilkan placeholder strip
+            else:                                 # Jika ada deteksi
+                for d in detections:              # Iterasi tiap deteksi
+                    st.write(                     # Tulis satu baris info deteksi
+                        f"- {d['label']} | skor {d['score']:.2%} | box {d['box']}"
+                )
+# ================================================================================ #
+
