@@ -39,6 +39,12 @@ WIN_FRACS   = (1.0, 0.7, 0.5, 0.4)           # Skala jendela relatif terhadap si
 STRIDE_FRAC = 0.33                           # Overlap ~67% (stride = 0.33 * window)
 MIN_VOTES   = 2                              # Minimal jumlah crop yang “setuju” agar label dihitung
 
+# --- Opsi untuk buah campur (matang & mentah muncul bersamaan) ---
+ALLOW_BOTH_ON_MIXED = True     # True = izinkan dua label pada buah yang sama
+MIX_GAP = 0.12                 # bolehkan dua label jika selisih prob <= 0.12 (12 poin persentase)
+MIN_VOTES_BOTH = max(3, MIN_VOTES)  # votes minimal agar dua label dianggap kuat
+
+
 # ==========================================
 # 3) Download model bila belum ada/terdeteksi korup
 # ==========================================
@@ -228,23 +234,35 @@ if uploaded_file is not None:
         if (p >= thr and v >= MIN_VOTES)
     ]
 
-    # ====== NMS / Filter label mirip (matang vs mentah) ======
-    # Grupkan berdasarkan nama buah (ambil sebelum "_" pertama)
-    grouped = {}
+    # ====== NMS label (matang vs mentah) dengan opsi “buah campur” ======
+    per_fruit = {}
     for label, prob, v in raw_detections:
-        fruit_name = label.split("_")[0]
-        if fruit_name not in grouped:
-            grouped[fruit_name] = (label, prob, v)
-        else:
-            # Simpan hanya label dengan probabilitas tertinggi
-            if prob > grouped[fruit_name][1]:
-                grouped[fruit_name] = (label, prob, v)
+        # pisah nama buah & tingkat kematangan
+        fruit, ripeness = label.rsplit("_", 1)  # contoh: "belimbing","matang"
+        entry = per_fruit.setdefault(fruit, {})
+        entry[ripeness] = (label, prob, v)
 
-    # Final detections setelah NMS
-    detections = list(grouped.values())
+    detections = []
+    for fruit, pair in per_fruit.items():
+        a = pair.get("matang")
+        b = pair.get("mentah")
+
+        if ALLOW_BOTH_ON_MIXED and a and b:
+            # dua label sama-sama kuat? izinkan dua-duanya
+            prob_gap = abs(a[1] - b[1])
+            if (prob_gap <= MIX_GAP) and (a[2] >= MIN_VOTES_BOTH) and (b[2] >= MIN_VOTES_BOTH):
+                detections.extend([a, b])
+            else:
+                # pilih yang probabilitasnya lebih tinggi
+                detections.append(a if a[1] >= b[1] else b)
+        else:
+            # kalau cuma ada satu label yang lolos threshold/votes, ambil yang ada
+            if a: detections.append(a)
+            if b: detections.append(b)
 
     # Urutkan dari probabilitas tertinggi ke terendah
     detections.sort(key=lambda x: x[1], reverse=True)
+
 
     # (4) Tampilkan hasil
     st.subheader("🔍 Label Terdeteksi:")
