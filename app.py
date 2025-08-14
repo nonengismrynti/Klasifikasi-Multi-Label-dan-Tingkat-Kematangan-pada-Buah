@@ -258,4 +258,4 @@ if uploaded_file:
             line = f"{lbl}: {probs_max[i]:.2%} (thr {THRESHOLDS[i]:.2f}) {pass_thr}"
             if SHOW_VOTES:
                 line += f" | votes={votes[i]}"
-            st.write(line)
+            st.write(line) 
