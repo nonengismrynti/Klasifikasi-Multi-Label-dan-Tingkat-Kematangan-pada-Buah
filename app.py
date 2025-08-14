@@ -307,7 +307,7 @@ def draw_detections(image_pil, detections):
 # 10) UI App
 # ==========
 st.title("🍉 Klasifikasi Multi-Label Buah.")
-st.write("Upload gambar buahnya yaa.")
+st.write("Upload gambar buahnya yaaa.")
 
 # # Opsi NMS dari sidebar (bisa kamu ubah saat uji)
 # with st.sidebar:
