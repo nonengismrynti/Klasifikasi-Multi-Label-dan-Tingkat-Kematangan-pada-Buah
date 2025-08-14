@@ -42,7 +42,7 @@ if not os.path.exists(MODEL_PATH) or os.path.getsize(MODEL_PATH) < 50000:
     if os.path.exists(MODEL_PATH):
         st.warning("📦 File model korup. Mengunduh ulang...")
         os.remove(MODEL_PATH)
-    download_model()
+    download_model() 
 
 # ========================
 # Definisi model
