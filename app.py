@@ -39,10 +39,15 @@ WIN_FRACS   = (1.0, 0.7, 0.5, 0.4)           # Skala jendela relatif terhadap si
 STRIDE_FRAC = 0.33                           # Overlap ~67% (stride = 0.33 * window)
 MIN_VOTES   = 2                              # Minimal jumlah crop yang “setuju” agar label dihitung
 
-# --- Opsi untuk buah campur (matang & mentah muncul bersamaan) ---
-ALLOW_BOTH_ON_MIXED = True     # True = izinkan dua label pada buah yang sama
-MIX_GAP = 0.12                 # bolehkan dua label jika selisih prob <= 0.12 (12 poin persentase)
-MIN_VOTES_BOTH = max(3, MIN_VOTES)  # votes minimal agar dua label dianggap kuat
+# Izinkan dua label pada satu buah jika buktinya kuat
+ALLOW_BOTH_ON_MIXED = True      # True = boleh dua label (matang & mentah)
+MIX_GAP = 0.12                  # selisih prob maksimal agar dianggap "campur"
+
+# Recovery: kalau label kedua nyaris lolos, tetap tampilkan
+SECOND_LABEL_RECOVERY = True
+RECOVER_GAP = 0.18              # kalau |p1 - p2| <= nilai ini, anggap masih “dekat”
+SECOND_MIN_VOTES = max(3, MIN_VOTES)   # votes minimal utk label kedua
+SECOND_ALPHA = 0.75             # label kedua harus ≥ alpha * threshold-nya
 
 
 # ==========================================
@@ -234,35 +239,79 @@ if uploaded_file is not None:
         if (p >= thr and v >= MIN_VOTES)
     ]
 
-    # ====== NMS label (matang vs mentah) dengan opsi “buah campur” ======
+    # ====== NMS label (matang vs mentah) dengan opsi 2 label & recovery ======
+    # 1) Kumpulkan kandidat awal per buah
     per_fruit = {}
     for label, prob, v in raw_detections:
-        # pisah nama buah & tingkat kematangan
-        fruit, ripeness = label.rsplit("_", 1)  # contoh: "belimbing","matang"
+        fruit, ripeness = label.rsplit("_", 1)   # contoh: "belimbing","matang"
         entry = per_fruit.setdefault(fruit, {})
         entry[ripeness] = (label, prob, v)
+
+    # 2) Lihat juga skor semua kelas (walau tidak masuk raw_detections) untuk recovery
+    label_to_idx = {lbl: i for i, lbl in enumerate(LABELS)}
+    def get_full_score(label):
+        idx = label_to_idx[label]
+        return probs[idx], int(votes[idx])        # skor MAX antar-crop & votes aslinya
 
     detections = []
     for fruit, pair in per_fruit.items():
         a = pair.get("matang")
         b = pair.get("mentah")
 
-        if ALLOW_BOTH_ON_MIXED and a and b:
-            # dua label sama-sama kuat? izinkan dua-duanya
-            prob_gap = abs(a[1] - b[1])
-            if (prob_gap <= MIX_GAP) and (a[2] >= MIN_VOTES_BOTH) and (b[2] >= MIN_VOTES_BOTH):
+        # Ambil juga skor penuh (bisa tidak ada di raw_detections)
+        full_a = (f"{fruit}_matang",) + get_full_score(f"{fruit}_matang")
+        full_b = (f"{fruit}_mentah",) + get_full_score(f"{fruit}_mentah")
+
+        # Helper untuk cek lolos threshold+votes
+        def passed(lbl, p, v):
+            idx = label_to_idx[lbl]
+            return (p >= THRESHOLDS[idx]) and (v >= MIN_VOTES)
+
+        # Pakai kandidat awal; kalau kosong, pakai skor penuh sebagai fallback
+        a = a if a else full_a
+        b = b if b else full_b
+
+        # a = (label, prob, votes), b = (label, prob, votes)
+        # Keputusan:
+        if ALLOW_BOTH_ON_MIXED:
+            # Dua label sama-sama kuat & gap kecil → tampilkan dua-duanya
+            if passed(*a) and passed(*b) and abs(a[1] - b[1]) <= MIX_GAP:
                 detections.extend([a, b])
-            else:
-                # pilih yang probabilitasnya lebih tinggi
-                detections.append(a if a[1] >= b[1] else b)
-        else:
-            # kalau cuma ada satu label yang lolos threshold/votes, ambil yang ada
-            if a: detections.append(a)
-            if b: detections.append(b)
+                continue
 
-    # Urutkan dari probabilitas tertinggi ke terendah
+            # Recovery: hanya satu yang lolos, tapi yang satu lagi “nyaris”
+            if SECOND_LABEL_RECOVERY:
+                # tentukan mana yang lebih kuat
+                main, other = (a, b) if a[1] >= b[1] else (b, a)
+                main_ok = passed(*main)
+                # other harus cukup dekat & punya votes cukup & skor di atas (alpha * thr)
+                idx_other = label_to_idx[other[0]]
+                near_thr = THRESHOLDS[idx_other] * SECOND_ALPHA
+                if main_ok \
+                and abs(main[1] - other[1]) <= RECOVER_GAP \
+                and other[2] >= SECOND_MIN_VOTES \
+                and other[1] >= near_thr:
+                    detections.extend([main, other])
+                    continue
+                # kalau tidak memenuhi, ambil yang utama saja bila lolos
+                if main_ok:
+                    detections.append(main)
+                    continue
+
+        # Mode default: ambil yang melewati threshold; kalau dua-duanya lolos tapi gap besar → pilih skor tertinggi
+        both_ok = passed(*a) and passed(*b)
+        if both_ok:
+            # besar gap → pilih satu terbaik
+            chosen = a if a[1] >= b[1] else b
+            detections.append(chosen)
+        elif passed(*a):
+            detections.append(a)
+        elif passed(*b):
+            detections.append(b)
+        # kalau dua-duanya tidak lolos, jangan tambahkan apa-apa
+
+    # Urutkan dari probabilitas tertinggi
     detections.sort(key=lambda x: x[1], reverse=True)
-
 
     # (4) Tampilkan hasil
     st.subheader("🔍 Label Terdeteksi:")
