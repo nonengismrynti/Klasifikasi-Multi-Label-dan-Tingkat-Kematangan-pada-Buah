@@ -305,10 +305,8 @@ def draw_detections(image_pil, detections):
 # ==========
 # 10) UI App
 # ==========
-st.title("🍉 Klasifikasi Multi-Label Buah + NMS (post-sliding window)")
-st.write("Upload gambar buah; sistem akan mendeteksi beberapa label sekaligus. "
-         "NMS diterapkan **setelah** proses sliding-window agar prediksi ganda yang "
-         "beririsan tinggi tidak terhitung berlebih.")
+st.title("🍉 Klasifikasi Multi-Label Buah.")
+st.write("Upload gambar buahnya yaa.")
 
 # Opsi NMS dari sidebar (bisa kamu ubah saat uji)
 with st.sidebar:
@@ -361,10 +359,10 @@ if uploaded_file is not None:
             else:
                 st.write(f"✅ *{lbl}* ({best['score']:.2%})")
 
-    # (4) Visualisasi box hasil NMS (opsional)
-    if SHOW_BOXES and len(detections) > 0:
-        st.subheader("🖼️ Bounding Box Hasil NMS")
-        st.image(draw_detections(image, detections), use_container_width=True)
+    # # (4) Visualisasi box hasil NMS (opsional)
+    # if SHOW_BOXES and len(detections) > 0:
+    #     st.subheader("🖼️ Bounding Box Hasil NMS")
+    #     st.image(draw_detections(image, detections), use_container_width=True)
 
     # (5) Panel detail (probabilitas per-kelas)
     st.subheader("📊 Probabilitas & Threshold (agregasi MAX untuk monitoring)")
