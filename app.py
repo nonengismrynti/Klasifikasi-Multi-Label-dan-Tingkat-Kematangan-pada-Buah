@@ -1,5 +1,3 @@
-
-
 import streamlit as st                      # UI web
 import torch                                # PyTorch core
 import torch.nn as nn                       # Modul neural network
@@ -39,10 +37,14 @@ THRESHOLDS  = [0.01, 0.01, 0.01, 0.06, 0.02, 0.01]  # Threshold per-kelas (hasil
 # Sliding-window (dipasang di tahap prediksi/aplikasi sesuai arahan dosen)
 WIN_FRACS   = (1.0, 0.7, 0.5, 0.4)           # Skala jendela relatif terhadap sisi terpendek
 STRIDE_FRAC = 0.33                           # Overlap ~67% (stride = 0.33 * window)
-MIN_VOTES   = 2                              # Minimal jumlah crop yang “setuju” agar label dihitung
+MIN_VOTES   = 2                              # Minimal jumlah crop “setuju” agar kelas dipertimbangkan
+
+# NMS & merging
+IOU_NMS  = 0.45                              # IoU threshold untuk NMS per-kelas (0.45 agak agresif)
+IOU_PAIR = 0.30                              # IoU matang vs mentah → anggap objek yang sama bila >= 0.30
 
 # ==========================================
-# 3) Download model bila belum ada/terdeteksi korup
+# 3) Download model bila belum ada/korup
 # ==========================================
 def download_model():                        # Fungsi unduh model dari Google Drive
     with st.spinner('🔄 Mengunduh ulang model dari Google Drive...'):
@@ -162,7 +164,7 @@ transform = transforms.Compose([
 ])
 
 # ==========================================================
-# 7) Sliding-window inference + agregasi (MAX antar-crop)
+# 7) Sliding-window inference (kini juga kembalikan boxes)
 # ==========================================================
 def sliding_window_infer(image_pil, model, transform, device,
                          hidden_dim, patch_size,
@@ -170,21 +172,25 @@ def sliding_window_infer(image_pil, model, transform, device,
                          include_full=False):
     """
     Potong gambar menjadi beberapa crop overlap (multi-skala),
-    prediksi per-crop, lalu agregasi probabilitas per kelas
-    dengan operasi MAX antar-crop.
+    prediksi per-crop, lalu kembalikan:
+       - probs_max:  max antar-crop per kelas [C]
+       - probs_crops: semua probabilitas per crop [N, C]
+       - boxes: koordinat crop (x1,y1,x2,y2) [N, 4] untuk NMS
     """
     W, H = image_pil.size                                          # Lebar & tinggi asli
     short = min(W, H)                                              # Sisi terpendek (basis window)
-    crops = []                                                     # Kumpulan crop
+    crops, boxes = [], []                                          # Kumpulan crop & box
 
     for wf in win_fracs:                                           # Loop tiap skala window
         win  = max(int(short * wf), 64)                            # Ukuran window (min 64 px)
         step = max(1, int(win * stride_frac))                      # Stride (overlap tinggi → step kecil)
         for top in range(0, max(H - win + 1, 1), step):            # Iterasi vertikal
             for left in range(0, max(W - win + 1, 1), step):       # Iterasi horizontal
+                boxes.append((left, top, left + win, top + win))   # Simpan box
                 crops.append(image_pil.crop((left, top, left + win, top + win)))  # Ambil crop persegi
 
     if include_full:                                               # Opsional: tambahkan full image
+        boxes.append((0, 0, W, H))
         crops.append(image_pil)
 
     num_tokens = (IMAGE_SIZE // patch_size) ** 2                   # 225 token (15x15)
@@ -201,56 +207,138 @@ def sliding_window_infer(image_pil, model, transform, device,
 
     probs_crops = np.stack(probs_list, axis=0)                     # [N, C] semua crop
     probs_max   = probs_crops.max(axis=0)                          # Agregasi MAX antar-crop → [C]
-    return probs_max, probs_crops                                   # Kembalikan vektor & matriks
+    boxes       = np.array(boxes, dtype=np.float32)                # [N, 4]
+    return probs_max, probs_crops, boxes
+
+# ==========================================================
+# 8) NMS utilities (untuk seleksi hasil per-objek)
+# ==========================================================
+def iou_xyxy(a, b):
+    """Hitung IoU antara dua box xyxy."""
+    x1, y1 = max(a[0], b[0]), max(a[1], b[1])
+    x2, y2 = min(a[2], b[2]), min(a[3], b[3])
+    inter  = max(0.0, x2 - x1) * max(0.0, y2 - y1)                 # luas irisan
+    area_a = max(0.0, a[2]-a[0]) * max(0.0, a[3]-a[1])             # luas A
+    area_b = max(0.0, b[2]-b[0]) * max(0.0, b[3]-b[1])             # luas B
+    denom  = area_a + area_b - inter + 1e-8
+    return inter / denom
+
+def nms_per_class(boxes, scores, thr=IOU_NMS):
+    """Non-Maximum Suppression sederhana untuk satu kelas."""
+    order = np.argsort(-scores)                                    # urut skor desc
+    keep = []
+    while order.size:
+        i = order[0]                                               # pilih skor tertinggi
+        keep.append(i)
+        rest = order[1:]
+        # buang yang IoU besar (tumpang tindih kuat)
+        rest = rest[[iou_xyxy(boxes[i], boxes[j]) <= thr for j in rest]]
+        order = rest
+    return keep
+
+def merge_pairs(detections):
+    """
+    Gabungkan pasangan matang vs mentah per keluarga buah.
+    Bila overlap >= IOU_PAIR → anggap objek yang sama → pilih yang skor lebih tinggi.
+    """
+    pairs = [('alpukat_matang', 'alpukat_mentah'),
+             ('belimbing_matang', 'belimbing_mentah'),
+             ('mangga_matang',   'mangga_mentah')]
+    final = []
+    for a, b in pairs:
+        A = [d for d in detections if d["label"] == a]
+        B = [d for d in detections if d["label"] == b]
+        used_B = set()
+        for da in A:
+            best_j, best_iou = -1, 0.0
+            for j, db in enumerate(B):
+                if j in used_B: 
+                    continue
+                iou = iou_xyxy(da["box"], db["box"])
+                if iou > best_iou:
+                    best_iou, best_j = iou, j
+            if best_iou >= IOU_PAIR:
+                # objek sama → ambil label skor tertinggi
+                chosen = da if da["score"] >= B[best_j]["score"] else B[best_j]
+                final.append(chosen)
+                used_B.add(best_j)
+            else:
+                # tidak bertumpuk cukup → simpan keduanya (buah berbeda)
+                final.append(da)
+        # tambahkan sisa B yang belum dipasangkan
+        final.extend(db for j, db in enumerate(B) if j not in used_B)
+    return final
+
+def postprocess_with_nms(boxes, probs_crops, votes, min_votes=MIN_VOTES):
+    """
+    1) Filter skor per-kelas + syarat votes.
+    2) NMS per-kelas → hilangkan duplikasi crop pada kelas yang sama.
+    3) Merge matang vs mentah (per keluarga buah) → satu label per buah.
+    4) Urutkan berdasarkan skor menurun.
+    """
+    detections = []
+    for c, label in enumerate(LABELS):
+        scores = probs_crops[:, c]
+        mask   = scores >= THRESHOLDS[c]                            # lulus ambang?
+        if not mask.any() or votes[c] < min_votes:                  # cukup votes per-kelas?
+            continue
+        b = boxes[mask]
+        s = scores[mask]
+        keep = nms_per_class(b, s, thr=IOU_NMS)                     # NMS per-kelas
+        for k in keep:
+            detections.append({"label": label, "c": c,
+                               "score": float(s[k]), "box": b[k]})
+
+    if not detections:
+        return []
+
+    # Gabungkan matang-mentah untuk buah yang sama
+    merged = merge_pairs(detections)
+
+    # Urutkan by skor desc
+    merged.sort(key=lambda d: d["score"], reverse=True)
+    return merged
 
 # ==========
-# 8) UI App
+# 9) UI App
 # ==========
-st.title("🍉 Klasifikasi Multi-Label Buah")                         # Judul
-st.write("Upload gambar buah; sistem akan mendeteksi beberapa label sekaligus.")  # Deskripsi
+st.title("🍉 Klasifikasi Multi-Label Buah")
+st.write("Upload gambar buah; sistem akan mendeteksi beberapa label sekaligus (sliding-window + NMS).")
 
-uploaded_file = st.file_uploader("Unggah gambar buah", type=['jpg', 'jpeg', 'png'])  # Uploader
+uploaded_file = st.file_uploader("Unggah gambar buah", type=['jpg', 'jpeg', 'png'])
 
-if uploaded_file is not None:                                       # Jika ada file diunggah
-    image = Image.open(uploaded_file).convert('RGB')                # Baca sebagai RGB
-    st.image(image, caption="Gambar Input", use_container_width=True)  # Tampilkan
+if uploaded_file is not None:
+    image = Image.open(uploaded_file).convert('RGB')
+    st.image(image, caption="Gambar Input", use_container_width=True)
 
-    # (1) Prediksi dengan Sliding-Window
-    probs_max, probs_crops = sliding_window_infer(
+    # (1) Prediksi dengan Sliding-Window → dapatkan probs per-crop & boxes
+    probs_max, probs_crops, boxes = sliding_window_infer(
         image_pil=image, model=model, transform=transform, device=device,
         hidden_dim=HIDDEN_DIM, patch_size=PATCH_SIZE,
         win_fracs=WIN_FRACS, stride_frac=STRIDE_FRAC, include_full=False
     )
-    probs = probs_max.tolist()                                      # Ke list Python
 
-    # (2) Hitung votes: jumlah crop yang melewati threshold per-kelas
-    votes = (probs_crops >= np.array(THRESHOLDS)).sum(axis=0).astype(int)  # [C]
+    # (2) Votes per-kelas (berapa crop ≥ threshold)
+    votes = (probs_crops >= np.array(MIN_VOTES * [0]) + np.array(THRESHOLDS)).sum(axis=0).astype(int)
 
-    # (3) Ambil kandidat: skor ≥ threshold dan votes ≥ MIN_VOTES
-    #     (TANPA aturan eksklusif matang vs mentah)
-    detections = [
-        (lbl, float(p), int(v))                     # tuple (nama_label, prob, votes)
-        for lbl, p, thr, v in zip(LABELS, probs, THRESHOLDS, votes.tolist())
-        if (p >= thr and v >= MIN_VOTES)            # syarat lulus
-    ]
+    # (3) NMS + merge matang/mentah → final detections
+    final_dets = postprocess_with_nms(boxes, probs_crops, votes, min_votes=MIN_VOTES)
 
-    # Urutkan dari probabilitas tertinggi ke terendah
-    detections.sort(key=lambda x: x[1], reverse=True)
-
-    # (4) Tampilkan hasil — votes disembunyikan jika SHOW_VOTES=False
+    # (4) Tampilkan hasil
     st.subheader("🔍 Label Terdeteksi:")
-    if not detections:
-        st.warning("🚫 Tidak ada label yang memenuhi kriteria (threshold + votes).")
+    if not final_dets:
+        st.warning("🚫 Tidak ada label yang memenuhi kriteria.")
     else:
-        st.write(f"Total label terdeteksi: **{len(detections)}**")
-        for label, prob, v in detections:
+        st.write(f"Total label terdeteksi: **{len(final_dets)}**")
+        for det in final_dets:
+            line = f"✅ *{det['label']}* ({det['score']:.2%})"
             if SHOW_VOTES:
-                st.write(f"✅ *{label}* ({prob:.2%}) — votes: {v}")
-            else:
-                st.write(f"✅ *{label}* ({prob:.2%})")
+                line += f" | votes={int(votes[det['c']])}"
+            st.write(line)
 
-    # (5) Panel detail (opsional: votes hanya jika SHOW_VOTES=True)
-    with st.expander("📊 Lihat Semua Probabilitas"):
+    # (5) Panel detail (opsional analitik)
+    with st.expander("📊 Detail Probabilitas & Konsensus"):
+        probs = probs_max.tolist()
         mean_prob = float(np.mean(probs))
         entropy   = -float(np.mean([p * math.log(p + 1e-8) for p in probs]))
         st.write(f"🪟 crops: {probs_crops.shape[0]} | mean_prob: {mean_prob:.3f} | entropy: {entropy:.3f}")
@@ -259,16 +347,4 @@ if uploaded_file is not None:                                       # Jika ada f
             line = f"{lbl}: {probs[i]:.2%} (thr {THRESHOLDS[i]:.2f}) {pass_thr}"
             if SHOW_VOTES:
                 line += f" | votes={int(votes[i])}"
-            st.write(line)
-
-    # (6) Panel detail (opsional tampilkan votes sesuai flag)
-    with st.expander("📊 Lihat Semua Probabilitas"):
-        mean_prob = float(np.mean(probs))                            # Rata-rata probabilitas
-        entropy   = -float(np.mean([p * math.log(p + 1e-8) for p in probs]))  # Entropi sederhana
-        st.write(f"🪟 crops: {probs_crops.shape[0]} | mean_prob: {mean_prob:.3f} | entropy: {entropy:.3f}")
-        for i, lbl in enumerate(LABELS):
-            pass_thr = "✓" if probs[i] >= THRESHOLDS[i] else "✗"    # Lolos threshold?
-            line = f"{lbl}: {probs[i]:.2%} (thr {THRESHOLDS[i]:.2f}) {pass_thr}"
-            if SHOW_VOTES:
-                line += f" | votes={int(votes[i])}"                  # Tambah votes jika ingin
             st.write(line)
