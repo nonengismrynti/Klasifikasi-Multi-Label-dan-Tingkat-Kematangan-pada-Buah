@@ -352,13 +352,16 @@ if uploaded_file is not None:
     else:
         st.write(f"Total label: **{len(unique_labels)}**")
         for lbl in unique_labels:
-            # ambil skor tertinggi dari deteksi label tsb
-            best = max([d for d in detections if d["label"] == lbl], key=lambda x: x["score"])
-            if SHOW_VOTES:
-                idx = LABELS.index(lbl)
-                st.write(f"✅ *{lbl}* ({best['score']:.2%}) — votes: {int(votes[idx])}")
-            else:
-                st.write(f"✅ *{lbl}* ({best['score']:.2%})")
+            # # ambil skor tertinggi dari deteksi label tsb
+            # best = max([d for d in detections if d["label"] == lbl], key=lambda x: x["score"])
+            # if SHOW_VOTES:
+            #     idx = LABELS.index(lbl)
+            #     st.write(f"✅ *{lbl}* ({best['score']:.2%}) — votes: {int(votes[idx])}")
+            # else:
+            #     st.write(f"✅ *{lbl}* ({best['score']:.2%})")
+
+            #✅ TAMPILKAN LABEL SAJA (tanpa persen, tanpa votes)
+            st.write(f"✅ *{lbl}*")
 
     # # (4) Visualisasi box hasil NMS (opsional)
     # if SHOW_BOXES and len(detections) > 0:
@@ -366,16 +369,16 @@ if uploaded_file is not None:
     #     st.image(draw_detections(image, detections), use_container_width=True)
 
     # (5) Panel detail (probabilitas per-kelas)
-    st.subheader("📊 Probabilitas & Threshold (agregasi MAX untuk monitoring)")
-    mean_prob = float(np.mean(probs_max))
-    entropy   = -float(np.mean([p * math.log(p + 1e-8) for p in probs_max]))
-    st.write(f"🪟 total crops: {probs_crops.shape[0]} | mean_prob: {mean_prob:.3f} | entropy: {entropy:.3f}")
-    for i, lbl in enumerate(LABELS):
-        pass_thr = "✓" if probs_max[i] >= THRESHOLDS[i] else "✗"
-        line = f"{lbl}: {probs_max[i]:.2%} (thr {THRESHOLDS[i]:.2f}) {pass_thr}"
-        if SHOW_VOTES:
-            line += f" | votes={int(votes[i])}"
-        st.write(line)
+    # st.subheader("📊 Probabilitas & Threshold (agregasi MAX untuk monitoring)")
+    # mean_prob = float(np.mean(probs_max))
+    # entropy   = -float(np.mean([p * math.log(p + 1e-8) for p in probs_max]))
+    # st.write(f"🪟 total crops: {probs_crops.shape[0]} | mean_prob: {mean_prob:.3f} | entropy: {entropy:.3f}")
+    # for i, lbl in enumerate(LABELS):
+    #     pass_thr = "✓" if probs_max[i] >= THRESHOLDS[i] else "✗"
+    #     line = f"{lbl}: {probs_max[i]:.2%} (thr {THRESHOLDS[i]:.2f}) {pass_thr}"
+    #     if SHOW_VOTES:
+    #         line += f" | votes={int(votes[i])}"
+    #     st.write(line)
 
     # ===== Debug expander "Semua Deteksi (setelah NMS)" dinonaktifkan di produksi =====
     SHOW_DEBUG_DETECTIONS = False                 # Flag internal: kalau True, tampilkan daftar semua box
